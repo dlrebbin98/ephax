@@ -4,7 +4,7 @@ import numpy as np
 from scipy.signal import butter, lfilter
 from matplotlib.colors import LogNorm, Normalize
 from matplotlib.cm import ScalarMappable, viridis
-from helper_functions import load_raw
+from ephax.helper_functions import load_raw
 
 """
 This script shows how to open a raw data file and how to read and interpret the data. 

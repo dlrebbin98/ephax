@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import re
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 from scipy.stats import chi2
 
 def load_spikes_raw(filename, well_no, recording_no=0):
@@ -315,7 +316,6 @@ def get_activity_sorted_electrodes(spikes_data_list, start=0, stop=None, start_t
 
     # Return the top N electrodes based on start and stop indices
     most_active_electrodes = [electrode for electrode, count in sorted_electrodes[start:stop]]
-    print(most_active_electrodes)
     return most_active_electrodes
 
 def assign_r_distance(spikes_df, layout_df, ref_electrode):
@@ -389,3 +389,11 @@ def likelihood_ratio_test(logL_full, logL_reduced, df):
     print(f"DF: {df}")
     p_value = chi2.sf(LRT_stat, df)
     return LRT_stat, p_value
+
+# Visualization helpers
+def truncate_colormap(cmap, minval: float = 0.0, maxval: float = 1.0, n: int = 100):
+    """Return a truncated copy of a colormap between [minval, maxval]."""
+    return LinearSegmentedColormap.from_list(
+        f"truncated({getattr(cmap, 'name', 'cmap')},{minval:.2f},{maxval:.2f})",
+        cmap(np.linspace(minval, maxval, n)),
+    )
