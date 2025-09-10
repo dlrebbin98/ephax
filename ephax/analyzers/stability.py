@@ -12,7 +12,7 @@ import scipy
 from scipy.stats import gaussian_kde, binned_statistic
 
 from ..prep import RestingActivityDataset
-from ..spikes import calculate_ifr
+from ..helper_functions import calculate_ifr
 
 
 @dataclass
@@ -476,4 +476,3 @@ class StabilityAnalyzer:
         ax.legend()
         plt.tight_layout()
         plt.show()
-

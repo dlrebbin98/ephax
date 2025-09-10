@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from ..compute import ifr_peaks, fit_ifr_gmm
 from ..models import IFRPeaks, GMMFit, CofiringHeatmap
 from ..prep import RestingActivityDataset, PrepConfig
+from ..helper_functions import calculate_ifr
 
 
 @dataclass
@@ -36,65 +37,7 @@ class IFRConfig:
     time_grid_hz: float = 100.0          # resampling rate for IFR heatmap
     max_time_points: int = 5000          # cap to guard memory
 
-def calculate_ifr(spikes_data, selected_electrodes, start_time=None, end_time=None):
-    # Initialize a dictionary to hold spike times for each selected electrode
-    electrode_spikes = {el: [] for el in selected_electrodes}
-
-    # Iterate over the spikes once, collecting times for selected electrodes
-    for time, electrode in zip(spikes_data['time'], spikes_data['electrode']):
-        if electrode in electrode_spikes:
-            electrode_spikes[electrode].append(time)
-
-    # Convert lists to numpy arrays for further processing
-    for el in electrode_spikes:
-        electrode_spikes[el] = np.array(electrode_spikes[el])
-    
-    if start_time is None:
-        start_time = min(spikes_data['time'])
-    if end_time is None:
-        end_time = max(spikes_data['time'])
-    
-    def _calculate_ifr_for_electrode(spike_times):
-        if len(spike_times) < 2:
-            return [start_time, end_time], [0, 0]
-        
-        ifr_times = [start_time]
-        ifr_values = [0]
-        
-        first_spike = spike_times[0]
-        ifr_times.append(first_spike)
-        ifr_values.append(0)
-        
-        for i in range(len(spike_times) - 1):
-            current_spike = spike_times[i]
-            next_spike = spike_times[i + 1]
-            interval = next_spike - current_spike
-            
-            ifr_times.extend([current_spike, next_spike])
-            ifr_values.extend([1/interval, 1/interval])
-        
-        last_spike = spike_times[-1]
-        ifr_times.append(last_spike)
-        ifr_values.append(0)
-        
-        ifr_times.append(end_time)
-        ifr_values.append(0)
-        
-        return np.array(ifr_times), np.array(ifr_values)
-
-    ifr_data = {}
-    total_firing = {}
-    all_ifr_values = []
-
-    for electrode, spike_times in electrode_spikes.items():
-        spike_times = spike_times[(spike_times >= start_time) & (spike_times <= end_time)]
-        if len(spike_times) > 0:
-            ifr_times, ifr_values = _calculate_ifr_for_electrode(spike_times)
-            ifr_data[electrode] = (ifr_times, ifr_values)
-            total_firing[electrode] = len(spike_times) / (end_time - start_time)
-            all_ifr_values.extend(ifr_values)
-    
-    return ifr_data, total_firing, np.array(all_ifr_values)
+"""IFR plotting and analysis utilities."""
 
 class IFRAnalyzer:
     """High-level interface for instantaneous firing rate (IFR) analyses.

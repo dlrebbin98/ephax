@@ -397,3 +397,63 @@ def truncate_colormap(cmap, minval: float = 0.0, maxval: float = 1.0, n: int = 1
         f"truncated({getattr(cmap, 'name', 'cmap')},{minval:.2f},{maxval:.2f})",
         cmap(np.linspace(minval, maxval, n)),
     )
+
+# IFR utilities
+def calculate_ifr(spikes_data, selected_electrodes, start_time=None, end_time=None):
+    """Compute instantaneous firing rate (IFR) per electrode as a step function.
+
+    Returns (ifr_data, total_firing, all_ifr_values):
+    - ifr_data: dict[electrode] -> (times, values)
+    - total_firing: dict[electrode] -> mean rate over [start_time, end_time]
+    - all_ifr_values: flattened IFR values across selected electrodes
+    """
+    import numpy as np
+
+    electrode_spikes = {int(el): [] for el in selected_electrodes}
+    for t, el in zip(spikes_data['time'], spikes_data['electrode']):
+        if int(el) in electrode_spikes:
+            electrode_spikes[int(el)].append(float(t))
+
+    for el in electrode_spikes:
+        electrode_spikes[el] = np.asarray(electrode_spikes[el], dtype=float)
+
+    if start_time is None:
+        start_time = float(np.min(spikes_data['time'])) if len(spikes_data['time']) else 0.0
+    if end_time is None:
+        end_time = float(np.max(spikes_data['time'])) if len(spikes_data['time']) else 0.0
+
+    def _calc(times):
+        if times.size < 2:
+            return np.array([start_time, end_time], dtype=float), np.array([0.0, 0.0], dtype=float)
+        ifr_times = [start_time]
+        ifr_values = [0.0]
+        first = times[0]
+        ifr_times.append(first)
+        ifr_values.append(0.0)
+        for i in range(times.size - 1):
+            a = times[i]
+            b = times[i + 1]
+            interval = max(1e-12, b - a)
+            val = 1.0 / interval
+            ifr_times.extend([a, b])
+            ifr_values.extend([val, val])
+        last = times[-1]
+        ifr_times.append(last)
+        ifr_values.append(0.0)
+        ifr_times.append(end_time)
+        ifr_values.append(0.0)
+        return np.asarray(ifr_times, dtype=float), np.asarray(ifr_values, dtype=float)
+
+    ifr_data = {}
+    total_firing = {}
+    all_ifr_values = []
+    for el, times in electrode_spikes.items():
+        sel = (times >= float(start_time)) & (times <= float(end_time))
+        times_sel = times[sel]
+        if times_sel.size > 0:
+            t_arr, v_arr = _calc(times_sel)
+            ifr_data[el] = (t_arr, v_arr)
+            duration = max(1e-12, float(end_time) - float(start_time))
+            total_firing[el] = float(times_sel.size) / duration
+            all_ifr_values.extend(v_arr.tolist())
+    return ifr_data, total_firing, np.asarray(all_ifr_values, dtype=float)

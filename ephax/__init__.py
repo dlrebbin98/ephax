@@ -6,7 +6,7 @@ Modules:
 - models: small dataclasses for structured outputs
 """
 
-from . import compute, viz, models, helper_functions  # re-export namespaces
+from . import compute, models, helper_functions  # re-export namespaces (avoid viz to prevent cycles)
 from .analyzers import IFRAnalyzer  # convenience import
 from .analyzers.ifr import IFRConfig  # expose IFR config like others
 from .prep import RestingActivityDataset, PrepConfig, Recording

@@ -13,8 +13,8 @@ from sklearn.mixture import GaussianMixture
 from .models import BinnedSeries, IFRPeaks, GMMFit, CofiringHeatmap
 
 # Local imports from the existing repo
-from ephax.helper_functions import assign_r_distance, get_activity_sorted_electrodes
-from ephax.spikes import calculate_ifr
+from .helper_functions import assign_r_distance, get_activity_sorted_electrodes
+from .helper_functions import calculate_ifr
 
 
 def bin_series(x: np.ndarray, y: np.ndarray, bins: np.ndarray) -> BinnedSeries:
