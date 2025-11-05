@@ -1,5 +1,7 @@
 from __future__ import annotations
-
+import warnings
+warnings.filterwarnings("ignore", message="Intel MKL WARNING")
+warnings.filterwarnings("ignore", message="RuntimeWarning: overflow encountered")
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass

@@ -296,8 +296,8 @@ def animate_sum_of_waves(f_list, v_eph, v_ax, max_um, lambda_eph):
     ani = FuncAnimation(fig, animate, frames=N_frames, interval=50, blit=True)
 
     # Save the animation
-    ani.save('Outputs/signal_summation.gif', writer='imagemagick', fps=30)
-    fig.savefig('Outputs/signal_summation.png')
+    ani.save('signal_summation.gif', writer='imagemagick', fps=30)
+    fig.savefig('signal_summation.png')
 
     plt.show()
 
@@ -306,12 +306,12 @@ def animate_sum_of_waves(f_list, v_eph, v_ax, max_um, lambda_eph):
 
 if __name__ == "__main__":
     # Parameters
-    f1 = 46     # frequency in Hz
-    f2 = 195
+    f1 = 52     # frequency in Hz
+    f2 = 201
     f3 = 615    
     v_eph = 0.1*1e6     # Velocity v1 in m/s (variable)
     v_ax = 0.45*1e6      # Velocity v2 in m/s (variable)
-    max_um = 3700       # Maximum micrometer plotted on x-axis
+    max_um = 3500       # Maximum micrometer plotted on x-axis
 
     sigma_list = [0., 0.1, 0.2, 0.3]
     plot_r_sigma(f1, v_eph, v_ax, max_um, sigma_list)
@@ -319,7 +319,7 @@ if __name__ == "__main__":
     sigma = 0.2
     #plot_sum_lognormal([f1], v_eph, v_ax, max_um, sigma_list)
     # Animate the summing up of individual contributions
-    #animate_sum_of_waves([f1, f2, f3], v_eph, v_ax, max_um, 100000)
+    animate_sum_of_waves([f1, f2, f3], v_eph, v_ax, max_um, 100000)
 
     #plot_v_decay(max_um)
 

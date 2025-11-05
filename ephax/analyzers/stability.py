@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Iterable
 
 import numpy as np
 import pandas as pd
@@ -32,8 +32,19 @@ class StabilityAnalyzer:
     - Provides plotting helpers to visualize distributions and CI with significance
     """
 
-    def __init__(self, dataset: RestingActivityDataset, config: Optional[StabilityConfig] = None):
+    def __init__(
+        self,
+        dataset: RestingActivityDataset,
+        config: Optional[StabilityConfig] = None,
+        dataset_perm: RestingActivityDataset | List[RestingActivityDataset] | None = None,
+    ):
         self.ds = dataset
+        if dataset_perm is None:
+            self.ds_perm: List[RestingActivityDataset] = []
+        elif isinstance(dataset_perm, list):
+            self.ds_perm = dataset_perm
+        else:
+            self.ds_perm = [dataset_perm]
         self.cfg = config or StabilityConfig()
 
     # -------- Activity selection (legacy-compatible) --------
@@ -83,9 +94,14 @@ class StabilityAnalyzer:
         return bins, smoothed
 
     # -------- Prepare pairs --------
-    def prepare(self, plot_heatmap: bool = False) -> List[Dict]:
+    def prepare(
+        self,
+        plot_heatmap: bool = False,
+        dataset: RestingActivityDataset | None = None,
+    ) -> List[Dict]:
+        ds_use = dataset or self.ds
         all_pairs: List[Dict] = []
-        for idx, rec in enumerate(self.ds.recordings):
+        for idx, rec in enumerate(ds_use.recordings):
             spikes_data = rec.spikes
             layout = rec.layout
             start_time = rec.start_time
@@ -218,16 +234,22 @@ class StabilityAnalyzer:
         self,
         all_pairs: List[Dict],
         bin_size: int = 200,
-        max_distance: int = 3200,
+        max_distance: int = 3500,
         tau: int = 10,
         m: int = 5,
         max_pairs_per_bin: int = 20000,
         random_state: Optional[int] = 42,
         stratified: bool = True,
+        bin_edges: np.ndarray | None = None,
     ) -> Tuple[Dict[int, Dict], np.ndarray]:
         print("\nStarting stability analysis...")
         distances = [pair['distance'] for pair in all_pairs]
-        bins = np.arange(0, max_distance, bin_size)
+        if bin_edges is not None:
+            bins = np.asarray(bin_edges, dtype=float)
+        else:
+            bins = np.arange(0, max_distance + bin_size, bin_size)
+        if bins.ndim != 1 or bins.size < 2:
+            raise ValueError("bin_edges must define at least two boundaries.")
         print(f"Created {len(bins)-1} distance bins")
 
         print("Binning pairs...")
@@ -356,51 +378,188 @@ class StabilityAnalyzer:
         return out
 
     @staticmethod
-    def plot_stability_distributions(stability_metrics: Dict[int, Dict], bins: np.ndarray) -> None:
+    def _fit_correlation_curve(
+        corr_x: np.ndarray,
+        corr_y: np.ndarray,
+        x_target: np.ndarray,
+        y_target: np.ndarray,
+        allow_offset: bool = True,
+    ) -> tuple[np.ndarray, np.ndarray, float, float] | None:
+        """Scale/shift a correlation template so it best matches ``y_target``."""
+        if corr_x is None or corr_y is None:
+            return None
+
+        corr_x = np.asarray(corr_x, dtype=float)
+        corr_y = np.asarray(corr_y, dtype=float)
+        x_target = np.asarray(x_target, dtype=float)
+        y_target = np.asarray(y_target, dtype=float)
+
+        if corr_x.size == 0 or corr_y.size == 0 or x_target.size == 0:
+            return None
+
+        order = np.argsort(corr_x)
+        corr_x_sorted = corr_x[order]
+        corr_y_sorted = corr_y[order]
+
+        interp = np.interp(
+            x_target,
+            corr_x_sorted,
+            corr_y_sorted,
+            left=np.nan,
+            right=np.nan,
+        )
+
+        mask = np.isfinite(interp) & np.isfinite(y_target)
+        if np.count_nonzero(mask) < (2 if allow_offset else 1):
+            return None
+
+        base = interp[mask]
+        target = y_target[mask]
+
+        try:
+            if allow_offset:
+                A = np.column_stack([base, np.ones_like(base)])
+                coeffs, *_ = np.linalg.lstsq(A, target, rcond=None)
+                amp = float(coeffs[0])
+                offset = float(coeffs[1])
+                if amp < 0:
+                    amp = 0.0
+                    offset = float(np.nanmean(target))
+            else:
+                denom = float(np.dot(base, base))
+                if denom <= 0:
+                    return None
+                amp = float(np.dot(base, target) / denom)
+                if amp < 0:
+                    amp = 0.0
+                offset = 0.0
+        except np.linalg.LinAlgError:
+            return None
+
+        if not np.isfinite(amp) or not np.isfinite(offset):
+            return None
+
+        fitted = amp * corr_y_sorted + offset
+        return corr_x_sorted, fitted, amp, offset
+
+    @staticmethod
+    def plot_stability_distributions(
+        stability_metrics: Dict[int, Dict],
+        bins: np.ndarray,
+        stability_metrics_perm: Optional[List[Dict[int, Dict]]] = None,
+    ) -> None:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-        distances = [metrics['distance'] for metrics in stability_metrics.values()]
-        raw = [metrics['raw_lyap'] for metrics in stability_metrics.values()]
-        data = []
-        for distance, raw_values in zip(distances, raw):
-            for value in raw_values:
-                data.append({"Distance": distance, "Lyapunov": value})
-        raw_df = pd.DataFrame(data)
-        max_lyap = 2
-        sns.violinplot(data=raw_df, x="Distance", y="Lyapunov", ax=ax1)
+
+        def _metrics_to_records(metrics: Dict[int, Dict], label: str) -> list[dict]:
+            records: list[dict] = []
+            for data in metrics.values():
+                dist = data.get('distance')
+                for value in data.get('raw_lyap', []):
+                    records.append({"Distance": dist, "Lyapunov": value, "Condition": label})
+            return records
+
+        records = _metrics_to_records(stability_metrics, "Original")
+        if stability_metrics_perm:
+            for idx, metrics_perm in enumerate(stability_metrics_perm):
+                label = "Permuted" if len(stability_metrics_perm) == 1 else f"Permuted #{idx+1}"
+                records.extend(_metrics_to_records(metrics_perm, label))
+
+        if not records:
+            print("No Lyapunov exponents available to plot.")
+            return
+
+        raw_df = pd.DataFrame(records)
+        dist_order = sorted(raw_df['Distance'].dropna().unique())
+        raw_df['Distance'] = pd.Categorical(raw_df['Distance'], categories=dist_order, ordered=True)
+
+        if raw_df.empty:
+            max_lyap = 0.0
+        else:
+            max_series = raw_df['Lyapunov'].max(skipna=True)
+            max_lyap = float(max_series) if np.isfinite(max_series) else 0.0
+        sns.violinplot(
+            data=raw_df,
+            x="Distance",
+            y="Lyapunov",
+            hue="Condition" if stability_metrics_perm is not None else None,
+            dodge=True,
+            cut=0,
+            ax=ax1,
+        )
+        if stability_metrics_perm is not None:
+            ax1.legend(title="Condition", frameon=False)
+        else:
+            legend = ax1.get_legend()
+            if legend is not None:
+                legend.remove()
         ax1.set_title('Raw Lyapunov Exponent Distributions')
         ax1.set_xlabel('Distance (μm)')
         ax1.set_ylabel('Lyapunov Exponent')
-        ax1.set_ylim(top=max_lyap)
+        ax1.set_ylim(top=max_lyap if max_lyap > 0 else 1.0)
 
-        lyap_grid = np.linspace(min(raw_df['Lyapunov']), max(raw_df['Lyapunov']), 100)
-        avg_kde = scipy.stats.gaussian_kde(raw_df['Lyapunov'])
-        avg_density = avg_kde(lyap_grid)
-        mean = np.mean(raw_df['Lyapunov'], axis=0)
-        ci = 1.96 * np.std(raw_df['Lyapunov'], axis=0) / np.sqrt(len(raw_df['Lyapunov']))
-        print(f'Average LE: {mean:.4} ± {ci:.4f}')
+        # KDE difference heatmap (Original minus Permuted when available, else against overall mean)
+        distance_grid = dist_order
+        exp_values = raw_df['Lyapunov'].to_numpy()
+        lyap_min = float(np.nanmin(exp_values)) if exp_values.size else 0.0
+        lyap_max = float(np.nanmax(exp_values)) if exp_values.size else 1.0
+        if lyap_min == lyap_max:
+            lyap_max = lyap_min + 1.0
+        lyap_grid = np.linspace(lyap_min, lyap_max, 200)
 
-        diffs = []
-        for values in raw:
-            if len(values) > 1:
-                kde = scipy.stats.gaussian_kde(values)
-                density = kde(lyap_grid)
-                diff = density - avg_density
+        def _kde(values: np.ndarray) -> np.ndarray:
+            values = values[np.isfinite(values)]
+            if values.size > 1:
+                return gaussian_kde(values)(lyap_grid)
+            return np.zeros_like(lyap_grid)
+
+        orig_by_distance = {
+            data['distance']: np.asarray(data.get('raw_lyap', []), dtype=float)
+            for data in stability_metrics.values()
+        }
+        perm_by_distance: Dict[float, List[np.ndarray]] = {}
+        if stability_metrics_perm:
+            for metrics_perm in stability_metrics_perm:
+                for data in metrics_perm.values():
+                    dist = data.get('distance')
+                    perm_by_distance.setdefault(dist, []).append(
+                        np.asarray(data.get('raw_lyap', []), dtype=float)
+                    )
+
+        diff_columns = []
+        for dist in distance_grid:
+            orig_vals = orig_by_distance.get(dist, np.array([], dtype=float))
+            kde_orig = _kde(orig_vals)
+            if stability_metrics_perm:
+                perm_vals_list = perm_by_distance.get(dist, [])
+                if perm_vals_list:
+                    perm_concat = np.concatenate([vals for vals in perm_vals_list if vals.size], axis=0) if any(vals.size for vals in perm_vals_list) else np.array([], dtype=float)
+                else:
+                    perm_concat = np.array([], dtype=float)
+                kde_perm = _kde(perm_concat)
+                diff = kde_orig - kde_perm
             else:
-                diff = np.zeros_like(lyap_grid)
-            diffs.append(diff)
-        diffs_array = np.array(diffs).T
-        vmax = np.max(np.abs(diffs_array))
-        im = ax2.imshow(
-            diffs_array,
-            aspect='auto',
-            origin='lower',
-            extent=[min(distances), max(distances), min(lyap_grid), max_lyap],
-            cmap='RdBu_r', vmin=-vmax, vmax=vmax,
+                avg_density = _kde(exp_values)
+                diff = kde_orig - avg_density
+            diff_columns.append(diff)
+
+        diff_matrix = np.column_stack(diff_columns) if diff_columns else np.zeros((len(lyap_grid), 0))
+        vmax = float(np.max(np.abs(diff_matrix))) if diff_matrix.size else 1.0
+        sns.heatmap(
+            diff_matrix,
+            cmap='RdBu_r',
+            center=0,
+            vmin=-vmax,
+            vmax=vmax,
+            xticklabels=[f"{d:.0f}" for d in distance_grid],
+            yticklabels=False,
+            cbar_kws={'label': 'Density Difference'},
+            ax=ax2,
         )
-        plt.colorbar(im, ax=ax2, label='Difference from Average KDE')
-        ax2.set_title('Difference from Average Distribution (KDE)')
         ax2.set_xlabel('Distance (μm)')
         ax2.set_ylabel('Lyapunov Exponent')
+        title_suffix = 'Original - Permuted' if stability_metrics_perm is not None else 'Difference from Global KDE'
+        ax2.set_title(f'Lyapunov KDE Difference ({title_suffix})')
+
         plt.tight_layout()
         plt.show()
 
@@ -409,70 +568,352 @@ class StabilityAnalyzer:
         cls,
         stability_metrics: Dict[int, Dict],
         bins: np.ndarray,
+        stability_metrics_perm: Optional[List[Dict[int, Dict]]] = None,
+        correlation_curve: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         alpha: float = 0.05,
         correction: str = "fdr_bh",
         test: str = "welch",
     ) -> None:
-        bin_indices = sorted(stability_metrics.keys())
-        distances = [stability_metrics[i]["distance"] for i in bin_indices]
-        arrays = [np.asarray(stability_metrics[i]["raw_lyap"], dtype=float) for i in bin_indices]
-        means = np.array([np.nan if len(a) == 0 else np.mean(a) for a in arrays], dtype=float)
-        ses = np.array([np.nan if len(a) < 2 else np.std(a, ddof=1) / np.sqrt(len(a)) for a in arrays], dtype=float)
-        cis = 1.96 * ses
+        if not stability_metrics_perm:
+            bin_indices = sorted(stability_metrics.keys())
+            distances = [stability_metrics[i]["distance"] for i in bin_indices]
+            arrays = [np.asarray(stability_metrics[i]["raw_lyap"], dtype=float) for i in bin_indices]
+            means = np.array([np.nan if len(a) == 0 else np.mean(a) for a in arrays], dtype=float)
+            ses = np.array([np.nan if len(a) < 2 else np.std(a, ddof=1) / np.sqrt(len(a)) for a in arrays], dtype=float)
+            cis = 1.96 * ses
 
-        # Global pool excluding each bin for testing
-        pvals = []
-        for i, a in enumerate(arrays):
-            if len(a) < 2:
-                pvals.append(np.nan)
-                continue
-            others = [arrays[j] for j in range(len(arrays)) if j != i and len(arrays[j]) > 1]
-            if not others:
-                pvals.append(np.nan)
-                continue
-            pooled = np.concatenate(others)
-            if test == "welch":
-                from scipy.stats import ttest_ind
-                _, p = ttest_ind(a, pooled, equal_var=False)
-            elif test == "ks":
-                from scipy.stats import ks_2samp
-                _, p = ks_2samp(a, pooled, alternative="two-sided", mode="auto")
+            pooled_all = np.concatenate([a for a in arrays if a.size > 0]) if arrays else np.array([])
+            pooled_all = pooled_all[np.isfinite(pooled_all)]
+            overall_mean = float(np.nan) if pooled_all.size == 0 else float(np.mean(pooled_all))
+
+            pvals = []
+            for i, a in enumerate(arrays):
+                if len(a) < 2:
+                    pvals.append(np.nan)
+                    continue
+                others = [arrays[j] for j in range(len(arrays)) if j != i and len(arrays[j]) > 1]
+                if not others:
+                    pvals.append(np.nan)
+                    continue
+                pooled = np.concatenate(others)
+                if test == "welch":
+                    from scipy.stats import ttest_ind
+                    _, p = ttest_ind(a, pooled, equal_var=False)
+                elif test == "ks":
+                    from scipy.stats import ks_2samp
+                    _, p = ks_2samp(a, pooled, alternative="two-sided", mode="auto")
+                else:
+                    raise ValueError("Unsupported test; use 'welch' or 'ks'.")
+                pvals.append(float(p))
+            pvals = np.array(pvals, dtype=float)
+
+            if correction == "fdr_bh":
+                adj_p = cls._fdr_bh(pvals)
+            elif correction == "bonferroni":
+                m = np.sum(np.isfinite(pvals))
+                adj_p = np.minimum(1.0, pvals * m)
             else:
-                raise ValueError("Unsupported test; use 'welch' or 'ks'.")
-            pvals.append(float(p))
-        pvals = np.array(pvals, dtype=float)
+                adj_p = pvals
 
-        # Multiple testing correction
-        if correction == "fdr_bh":
-            adj_p = cls._fdr_bh(pvals)
-        elif correction == "bonferroni":
-            m = np.sum(np.isfinite(pvals))
-            adj_p = np.minimum(1.0, pvals * m)
-        else:
-            adj_p = pvals
+            def star_fn(p):
+                if not np.isfinite(p):
+                    return ""
+                return "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < alpha else ""
 
-        def star(p):
+            stars = [star_fn(p) for p in adj_p]
+
+            order = np.argsort(np.asarray(distances, dtype=float))
+            x = np.asarray(distances, dtype=float)[order]
+            y = np.asarray(means, dtype=float)[order]
+            y_ci = np.asarray(cis, dtype=float)[order]
+
+            valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(y_ci)
+            x, y, y_ci = x[valid], y[valid], y_ci[valid]
+
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.fill_between(x, y - y_ci, y + y_ci, color="C0", alpha=0.2, linewidth=0, label="95% CI")
+            ax.plot(x, y, color="C0", lw=2, label="Mean")
+            ax.scatter(x, y, color="C0", edgecolor="white", zorder=3)
+
+            if np.isfinite(overall_mean):
+                ax.axhline(overall_mean, color="C3", lw=1.5, ls="--", alpha=0.8,
+                           label=f"Overall mean = {overall_mean:.3f}")
+
+            if x.size:
+                y_hi = y + y_ci
+                y_min = float(np.nanmin(y - y_ci))
+                y_max = float(np.nanmax(y + y_ci))
+                span = y_max - y_min if np.isfinite(y_max - y_min) and (y_max - y_min) > 0 else 1.0
+                y_off = 0.04 * span
+                stars_arr = np.array(stars, dtype=object)[order][valid]
+                for xi, yi, s in zip(x, y_hi, stars_arr):
+                    if s:
+                        ax.text(xi, yi + y_off, s, ha="center", va="bottom", fontsize=10, color="k")
+
+            ax.set_xlabel("Distance (μm)")
+            ax.set_ylabel("Lyapunov Exponent")
+            ax.set_title(
+                f"Lyapunov Mean ± 95% CI per Distance Bin (test={test}, correction={correction})"
+            )
+            ax.grid(True, which="both", alpha=0.2)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+
+            if correlation_curve is not None:
+                corr_x, corr_y = correlation_curve
+                fit = cls._fit_correlation_curve(corr_x, corr_y, x, y, allow_offset=True)
+                if fit is not None:
+                    corr_x_fit, corr_y_fit, amp, offset = fit
+                    label = f'Correlation fit (amp={amp:.2g}, b={offset:.2g})'
+                else:
+                    corr_x_fit, corr_y_fit = np.asarray(corr_x, dtype=float), np.asarray(corr_y, dtype=float)
+                    label = 'Correlation model'
+                ax_corr = ax.twinx()
+                ax_corr.plot(corr_x_fit, corr_y_fit, color='crimson', linestyle='--', label=label)
+                ax_corr.set_ylabel('Synergy model (a.u.)')
+                if np.any(np.isfinite(corr_y_fit)):
+                    ax_corr.set_ylim(float(np.nanmin(corr_y_fit)), float(np.nanmax(corr_y_fit)))
+                lines_data, labels_data = ax.get_legend_handles_labels()
+                lines_model, labels_model = ax_corr.get_legend_handles_labels()
+                ax.legend(lines_data + lines_model, labels_data + labels_model, loc='upper right')
+            else:
+                ax.legend(frameon=False)
+            plt.tight_layout()
+            plt.show()
+            return
+
+        # Comparison against permuted/null dataset
+        orig_metrics = {data['distance']: np.asarray(data.get('raw_lyap', []), dtype=float) for data in stability_metrics.values()}
+        perm_metrics: Dict[float, List[np.ndarray]] = {}
+        for metrics_perm in stability_metrics_perm:
+            for data in metrics_perm.values():
+                dist = data.get('distance')
+                perm_metrics.setdefault(dist, []).append(np.asarray(data.get('raw_lyap', []), dtype=float))
+        distances = sorted(set(orig_metrics.keys()) | set(perm_metrics.keys()))
+
+        orig_arrays = [orig_metrics.get(dist, np.array([], dtype=float)) for dist in distances]
+        perm_arrays = []
+        for dist in distances:
+            vals_list = perm_metrics.get(dist, [])
+            if vals_list:
+                concatenated = np.concatenate([arr for arr in vals_list if arr.size], axis=0) if any(arr.size for arr in vals_list) else np.array([], dtype=float)
+            else:
+                concatenated = np.array([], dtype=float)
+            perm_arrays.append(concatenated)
+
+        def _mean_ci(arr: np.ndarray) -> tuple[float, float]:
+            if arr.size == 0:
+                return np.nan, np.nan
+            mean = float(np.mean(arr))
+            if arr.size < 2:
+                return mean, np.nan
+            se = float(np.std(arr, ddof=1) / np.sqrt(arr.size))
+            return mean, 1.96 * se
+
+        means_orig, cis_orig = zip(*[_mean_ci(arr) for arr in orig_arrays]) if distances else ([], [])
+        means_perm, cis_perm = zip(*[_mean_ci(arr) for arr in perm_arrays]) if distances else ([], [])
+
+        summary_entries: list[tuple] = []
+        orig_counts = {
+            data['distance']: int(data.get('n_pairs', len(data.get('raw_lyap', []))))
+            for data in stability_metrics.values()
+        }
+        perm_counts: Dict[float, int] = {}
+        for metrics_perm in stability_metrics_perm:
+            for data in metrics_perm.values():
+                dist = data.get('distance')
+                count = int(data.get('n_pairs', len(data.get('raw_lyap', []))))
+                perm_counts[dist] = perm_counts.get(dist, 0) + count
+
+        x = np.asarray(distances, dtype=float)
+        means_orig = np.asarray(means_orig, dtype=float)
+        cis_orig = np.asarray(cis_orig, dtype=float)
+        means_perm = np.asarray(means_perm, dtype=float)
+        cis_perm = np.asarray(cis_perm, dtype=float)
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        mask_orig = np.isfinite(means_orig)
+        if np.any(mask_orig):
+            ax.fill_between(x[mask_orig], means_orig[mask_orig] - cis_orig[mask_orig], means_orig[mask_orig] + cis_orig[mask_orig], color="C0", alpha=0.2, linewidth=0)
+            ax.plot(x[mask_orig], means_orig[mask_orig], color="C0", lw=2, label="Original mean")
+            ax.scatter(x[mask_orig], means_orig[mask_orig], color="C0", edgecolor="white", zorder=3)
+
+        mask_perm = np.isfinite(means_perm)
+        if np.any(mask_perm):
+            ax.fill_between(x[mask_perm], means_perm[mask_perm] - cis_perm[mask_perm], means_perm[mask_perm] + cis_perm[mask_perm], color="C1", alpha=0.2, linewidth=0)
+            ax.plot(x[mask_perm], means_perm[mask_perm], color="C1", lw=2, label="Permuted mean")
+            ax.scatter(x[mask_perm], means_perm[mask_perm], color="C1", edgecolor="white", zorder=3)
+
+        # Significance tests per bin (original vs permuted)
+        from scipy.stats import ttest_ind
+
+        pvals = []
+        idxs = []
+        test_stats = []
+        for idx, (orig_arr, perm_arr) in enumerate(zip(orig_arrays, perm_arrays)):
+            if orig_arr.size >= 2 and perm_arr.size >= 2:
+                stat, p = ttest_ind(orig_arr, perm_arr, equal_var=False)
+                pvals.append(float(p))
+                idxs.append(idx)
+                test_stats.append(float(stat))
+
+        adj = np.array([])
+        if pvals:
+            pvals_array = np.array(pvals, dtype=float)
+            if correction == "fdr_bh":
+                adj = cls._fdr_bh(pvals_array)
+            elif correction == "bonferroni":
+                adj = np.minimum(1.0, pvals_array * len(pvals_array))
+            else:
+                adj = pvals_array
+
+        def star_fn(p):
             if not np.isfinite(p):
                 return ""
             return "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < alpha else ""
 
-        stars = [star(p) for p in adj_p]
+        if adj.size:
+            upper_orig = means_orig + cis_orig
+            upper_perm = means_perm + cis_perm
+            lower_orig = means_orig - cis_orig
+            lower_perm = means_perm - cis_perm
+            parts = [
+                upper_orig[np.isfinite(upper_orig)],
+                upper_perm[np.isfinite(upper_perm)],
+                lower_orig[np.isfinite(lower_orig)],
+                lower_perm[np.isfinite(lower_perm)],
+            ]
+            non_empty_parts = [part for part in parts if part.size]
+            cat = np.concatenate(non_empty_parts) if non_empty_parts else np.array([])
+            if cat.size == 0:
+                y_off_base = 1.0
+                span = 1.0
+            else:
+                y_min = np.nanmin(cat)
+                y_max = np.nanmax(cat)
+                span = y_max - y_min if np.isfinite(y_max - y_min) and (y_max - y_min) > 0 else 1.0
+                y_off_base = y_max
 
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.errorbar(distances, means, yerr=cis, fmt="o-", capsize=3, color="C0", label="Mean ± 95% CI")
+            y_offset = 0.04 * span
+            for seq_idx, (bin_idx, p_adj, stat) in enumerate(zip(idxs, adj, test_stats)):
+                star = star_fn(p_adj)
+                raw_p = pvals[seq_idx]
+                local_hi = np.nanmax([
+                    upper_orig[bin_idx] if np.isfinite(upper_orig[bin_idx]) else np.nan,
+                    upper_perm[bin_idx] if np.isfinite(upper_perm[bin_idx]) else np.nan,
+                ])
+                if not np.isfinite(local_hi):
+                    local_hi = y_off_base
+                if star:
+                    ax.text(
+                        x[bin_idx],
+                        local_hi + y_offset,
+                        star,
+                        ha="center",
+                        va="bottom",
+                        fontsize=10,
+                        color="k",
+                    )
+                dist = x[bin_idx]
+                summary_entries.append(
+                    (
+                        dist,
+                        orig_counts.get(dist, orig_arr.size),
+                        float(means_orig[bin_idx]),
+                        means_orig[bin_idx] - cis_orig[bin_idx] if np.isfinite(cis_orig[bin_idx]) else float('nan'),
+                        means_orig[bin_idx] + cis_orig[bin_idx] if np.isfinite(cis_orig[bin_idx]) else float('nan'),
+                        perm_counts.get(dist, perm_arr.size),
+                        float(means_perm[bin_idx]),
+                        means_perm[bin_idx] - cis_perm[bin_idx] if np.isfinite(cis_perm[bin_idx]) else float('nan'),
+                        means_perm[bin_idx] + cis_perm[bin_idx] if np.isfinite(cis_perm[bin_idx]) else float('nan'),
+                        stat,
+                        raw_p,
+                        p_adj,
+                    )
+                )
+        # Add rows for bins without valid comparison
+        compared_indices = set(idxs)
+        for bin_idx, dist in enumerate(x):
+            if bin_idx in compared_indices:
+                continue
+            orig_arr = orig_arrays[bin_idx]
+            perm_arr = perm_arrays[bin_idx]
+            summary_entries.append(
+                (
+                    dist,
+                    orig_counts.get(dist, orig_arr.size),
+                    float(means_orig[bin_idx]),
+                    means_orig[bin_idx] - cis_orig[bin_idx] if np.isfinite(cis_orig[bin_idx]) else float('nan'),
+                    means_orig[bin_idx] + cis_orig[bin_idx] if np.isfinite(cis_orig[bin_idx]) else float('nan'),
+                    perm_counts.get(dist, perm_arr.size),
+                    float(means_perm[bin_idx]),
+                    means_perm[bin_idx] - cis_perm[bin_idx] if np.isfinite(cis_perm[bin_idx]) else float('nan'),
+                    means_perm[bin_idx] + cis_perm[bin_idx] if np.isfinite(cis_perm[bin_idx]) else float('nan'),
+                    float('nan'),
+                    float('nan'),
+                    float('nan'),
+                )
+            )
+
         ax.set_xlabel("Distance (μm)")
         ax.set_ylabel("Lyapunov Exponent")
-        ax.set_title(
-            f"Lyapunov Mean ± 95% CI per Distance Bin (test={test}, correction={correction})"
-        )
-        if np.any(np.isfinite(means)):
-            y_hi = means + cis
-            y_min = np.nanmin(means - cis)
-            y_max = np.nanmax(means + cis)
-            y_off = 0.05 * (y_max - y_min if np.isfinite(y_max - y_min) and (y_max - y_min) > 0 else 1.0)
-            for x, y, s in zip(distances, y_hi, stars):
-                if s:
-                    ax.text(x, y + y_off, s, ha="center", va="bottom", fontsize=10, color="k")
-        ax.legend()
+        ax.set_title("Lyapunov Mean ± 95% CI (Original vs Permuted)")
+        ax.grid(True, which="both", alpha=0.2)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        if correlation_curve is not None:
+            corr_x, corr_y = correlation_curve
+            fit = cls._fit_correlation_curve(
+                corr_x,
+                corr_y,
+                x[mask_orig],
+                means_orig[mask_orig],
+                allow_offset=True,
+            ) if np.any(mask_orig) else None
+            if fit is not None:
+                corr_x_fit, corr_y_fit, amp, offset = fit
+                label = f'Correlation fit (amp={amp:.2g}, b={offset:.2g})'
+            else:
+                corr_x_fit, corr_y_fit = np.asarray(corr_x, dtype=float), np.asarray(corr_y, dtype=float)
+                label = 'Correlation model'
+            ax_corr = ax.twinx()
+            ax_corr.plot(corr_x_fit, corr_y_fit, color='crimson', linestyle='--', label=label)
+            ax_corr.set_ylabel('Synergy model (a.u.)')
+            if np.any(np.isfinite(corr_y_fit)):
+                ax_corr.set_ylim(float(np.nanmin(corr_y_fit)), float(np.nanmax(corr_y_fit)))
+            lines_data, labels_data = ax.get_legend_handles_labels()
+            lines_model, labels_model = ax_corr.get_legend_handles_labels()
+            ax.legend(lines_data + lines_model, labels_data + labels_model, loc='upper right')
+        else:
+            ax.legend(frameon=False)
         plt.tight_layout()
         plt.show()
+
+        if summary_entries:
+            summary_entries.sort(key=lambda row: row[0])
+            print("\nLyapunov per-bin summary (Original vs Permuted, Welch t-test):")
+            header = (
+                "Distance μm | n_orig | mean_orig | ci_orig_low | ci_orig_high | "
+                "n_perm | mean_perm | ci_perm_low | ci_perm_high | t-stat | p_raw | p_adj"
+            )
+            print(header)
+            for (
+                dist,
+                n_o,
+                mean_o,
+                ci_o_low,
+                ci_o_high,
+                n_p,
+                mean_p,
+                ci_p_low,
+                ci_p_high,
+                stat,
+                raw_p,
+                p_adj,
+            ) in summary_entries:
+                print(
+                    f"{dist:10.0f} | {n_o:6d} | {mean_o:9.4f} | {ci_o_low:11.4f} | {ci_o_high:11.4f} | "
+                    f"{n_p:6d} | {mean_p:9.4f} | {ci_p_low:11.4f} | {ci_p_high:11.4f} | {stat:6.3f} | {raw_p:5.2e} | {p_adj:5.2e}"
+                )

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import warnings
+warnings.filterwarnings("ignore", message="Intel MKL WARNING")
+warnings.filterwarnings("ignore", message="RuntimeWarning: overflow encountered")
+
 from dataclasses import dataclass
 from typing import Iterable, Optional
 

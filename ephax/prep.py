@@ -1,4 +1,7 @@
 from __future__ import annotations
+import warnings
+warnings.filterwarnings("ignore", message="Intel MKL WARNING")
+warnings.filterwarnings("ignore", message="RuntimeWarning: overflow encountered")
 
 from dataclasses import dataclass
 from typing import Iterable, List, Tuple, Literal, Optional
@@ -78,6 +81,72 @@ class Recording:
             if rates.size and (active_bins / rates.size * 100) > pct:
                 selected.append(int(e))
         return np.asarray(selected, dtype=int)
+
+    def randomize_electrode_mapping(
+        self,
+        seed: Optional[int] = None,
+        rng: np.random.Generator | None = None,
+        inplace: bool = False,
+        shuffle_layout_coordinates: bool = False,
+    ) -> "Recording":
+        """Shuffle channel→electrode assignments and optionally scramble layout coordinates.
+
+        A permutation is applied so each channel keeps its spike train but gets
+        reassigned to a random electrode label. When ``shuffle_layout_coordinates``
+        is True, the electrode labels are additionally attached to random
+        ``(x, y)`` coordinate pairs, breaking the original spatial arrangement.
+        The spikes' ``electrode`` labels are regenerated from the shuffled
+        layout to ensure consistency. If ``inplace`` is False (default) a new
+        :class:`Recording` is returned.
+        """
+        import numpy as np
+
+        if rng is not None and seed is not None:
+            raise ValueError("Provide either 'seed' or 'rng', not both.")
+        if rng is None:
+            rng = np.random.default_rng(seed)
+
+        required_layout_keys = {"channel", "electrode", "x", "y"}
+        missing_layout = required_layout_keys - set(self.layout.keys())
+        if missing_layout:
+            raise KeyError(f"Recording layout missing keys: {sorted(missing_layout)}")
+        if "channel" not in self.spikes:
+            raise KeyError("Recording spikes missing 'channel' field.")
+
+        layout = self.layout if inplace else self.layout.copy()
+        spikes = self.spikes if inplace else self.spikes.copy()
+
+        channels = np.asarray(layout["channel"])
+        if channels.size == 0:
+            return self if inplace else Recording(spikes=spikes, layout=layout, start_time=self.start_time, end_time=self.end_time, sf=self.sf)
+
+        perm_indices = rng.permutation(channels.size)
+        for key in ("electrode", "x", "y"):
+            layout[key] = np.asarray(layout[key])[perm_indices]
+
+        if shuffle_layout_coordinates and channels.size > 1:
+            coord_perm = rng.permutation(channels.size)
+            layout["x"] = np.asarray(layout["x"])[coord_perm]
+            layout["y"] = np.asarray(layout["y"])[coord_perm]
+
+        channel_to_electrode = dict(zip(channels, layout["electrode"]))
+        try:
+            spikes["electrode"] = np.asarray([channel_to_electrode[ch] for ch in np.asarray(spikes["channel"])], dtype=layout["electrode"].dtype)
+        except KeyError as exc:
+            raise KeyError(f"Spike channel {exc.args[0]} not present in layout after randomization.") from exc
+
+        if inplace:
+            self.layout = layout
+            self.spikes = spikes
+            return self
+
+        return Recording(
+            spikes=spikes,
+            layout=layout,
+            start_time=self.start_time,
+            end_time=self.end_time,
+            sf=self.sf,
+        )
 
 
 @dataclass

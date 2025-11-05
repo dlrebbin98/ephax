@@ -382,11 +382,16 @@ def log_likelihood(residuals, n_params):
     return log_likelihood
 
 def likelihood_ratio_test(logL_full, logL_reduced, df):
-    # Compute the LRT statistic
-    print(f"LRT(FULL): {logL_full}, LRT(REDUCED): {logL_reduced}")
-    LRT_stat = -2 * (logL_reduced - logL_full)
-    # Compute the p-value using chi-square distribution
-    print(f"DF: {df}")
+    """Compute likelihood-ratio statistic (FULL vs REDUCED) and p-value.
+
+    Returns (LRT_stat, p_value). Silent by default; callers should print
+    model context (e.g., included gamma components) if needed.
+    """
+    from scipy.stats import chi2
+    if df is None or df <= 0:
+        return np.nan, np.nan
+    # Standard LRT form; equivalent to -2*(logL_reduced - logL_full)
+    LRT_stat = 2 * (logL_full - logL_reduced)
     p_value = chi2.sf(LRT_stat, df)
     return LRT_stat, p_value
 

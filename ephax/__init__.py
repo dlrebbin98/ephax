@@ -5,6 +5,10 @@ Modules:
 - viz: plotting functions that accept computed results
 - models: small dataclasses for structured outputs
 """
+import os as _os  # set MKL/OpenMP env vars before importing any deps that may load MKL
+_os.environ.setdefault("KMP_WARNINGS", "0")
+_os.environ.setdefault("MKL_VERBOSE", "0")
+_os.environ.setdefault("MKL_DEBUG_CPU_TYPE", "5")
 
 from . import compute, models, helper_functions  # re-export namespaces (avoid viz to prevent cycles)
 from .analyzers import IFRAnalyzer  # convenience import
