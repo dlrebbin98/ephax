@@ -29,6 +29,54 @@ class LayoutGridPlotter:
     def __init__(self, dataset: RestingActivityDataset) -> None:
         self.ds = dataset
 
+    @staticmethod
+    def _interpolate_grid(
+        grid_avg: np.ndarray,
+        counts: np.ndarray,
+        x_min: float,
+        y_min: float,
+        grid_size: float,
+        method: str = "linear",
+    ) -> np.ndarray:
+        """Fill missing grid cells via spatial interpolation.
+
+        ``grid_avg`` holds averaged rates per bin; ``counts`` marks how many
+        electrodes contributed to each bin. Missing cells (counts == 0) are
+        interpolated in physical coordinate space. A nearest-neighbour fallback
+        is used when the primary method cannot provide a value.
+        """
+
+        if grid_avg.size == 0:
+            return grid_avg
+
+        missing = counts == 0
+        if not np.any(missing):
+            return grid_avg
+
+        x_centers = x_min + (np.arange(grid_avg.shape[0]) + 0.5) * grid_size
+        y_centers = y_min + (np.arange(grid_avg.shape[1]) + 0.5) * grid_size
+        grid_x, grid_y = np.meshgrid(x_centers, y_centers, indexing="ij")
+
+        known_mask = ~missing
+        points = np.column_stack((grid_x[known_mask], grid_y[known_mask]))
+        values = grid_avg[known_mask]
+
+        # Require at least three points to interpolate in 2D
+        if points.shape[0] < 3:
+            return grid_avg
+
+        targets = np.column_stack((grid_x[missing], grid_y[missing]))
+
+        interp_vals = griddata(points, values, targets, method=method)
+        if np.any(np.isnan(interp_vals)):
+            nearest = griddata(points, values, targets, method="nearest")
+            nan_mask = np.isnan(interp_vals)
+            interp_vals[nan_mask] = nearest[nan_mask]
+
+        filled = grid_avg.copy()
+        filled[missing] = interp_vals
+        return filled
+
     # --------- pooled across recordings ---------
     def compute_grid_avghz_pooled(self, grid_size: float = 50.0, interpolate: bool = False) -> GridResult:
         # Accumulate per-electrode average Hz across recordings
@@ -86,21 +134,8 @@ class LayoutGridPlotter:
                 gc[ix, iy] += 1
         with np.errstate(invalid='ignore', divide='ignore'):
             grid_avg = np.divide(grid, gc, where=gc != 0)
-        # Optionally interpolate missing cells in index space using cubic interpolation
         if interpolate:
-            known_points = []
-            known_values = []
-            for ix in range(grid.shape[0]):
-                for iy in range(grid.shape[1]):
-                    if gc[ix, iy] > 0:
-                        known_points.append((ix, iy))
-                        known_values.append(grid_avg[ix, iy])
-            if known_points:
-                grid_x, grid_y = np.meshgrid(range(grid.shape[0]), range(grid.shape[1]), indexing='ij')
-                interp = griddata(np.array(known_points), np.array(known_values), (grid_x, grid_y), method='cubic', fill_value=np.nan)
-                # Use interpolated values only where original was NaN
-                mask_missing = (gc == 0)
-                grid_avg[mask_missing] = interp[mask_missing]
+            grid_avg = self._interpolate_grid(grid_avg, gc, x_min, y_min, grid_size)
         # Mark remaining empty cells as NaN to avoid LogNorm issues and visual blocks
         grid_avg[gc == 0] = np.nan
         # LogNorm safety
@@ -181,18 +216,7 @@ class LayoutGridPlotter:
             with np.errstate(invalid='ignore', divide='ignore'):
                 grid_avg = np.divide(grid, gc, where=gc != 0)
             if interpolate:
-                known_points = []
-                known_values = []
-                for ix in range(grid.shape[0]):
-                    for iy in range(grid.shape[1]):
-                        if gc[ix, iy] > 0:
-                            known_points.append((ix, iy))
-                            known_values.append(grid_avg[ix, iy])
-                if known_points:
-                    grid_x, grid_y = np.meshgrid(range(grid.shape[0]), range(grid.shape[1]), indexing='ij')
-                    interp = griddata(np.array(known_points), np.array(known_values), (grid_x, grid_y), method='cubic', fill_value=np.nan)
-                    mask_missing = (gc == 0)
-                    grid_avg[mask_missing] = interp[mask_missing]
+                grid_avg = self._interpolate_grid(grid_avg, gc, x_min, y_min, grid_size)
             grid_avg[gc == 0] = np.nan
             valid_vals = grid_avg[np.isfinite(grid_avg) & (grid_avg > 1e-6)]
             if valid_vals.size == 0:
