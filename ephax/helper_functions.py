@@ -1,6 +1,7 @@
 import os
 import h5py
 from pathlib import Path
+from typing import Optional, Union
 import numpy as np
 import pandas as pd
 import re
@@ -203,7 +204,7 @@ def load_spikes(filename, well_no, min_amp=10):
         
     return spikes_data, event_data, layout, sf, stimulus_electrode
 
-def load_spikes_data(file_info, min_amp=0, base_dir: str | Path | None = None):
+def load_spikes_data(file_info, min_amp=0, base_dir: Optional[Union[str, Path]] = None):
     """Load spikes data and layout for each file in ``file_info``.
 
     ``file_info`` entries are tuples of (folder, filename, start_time, end_time, well).
@@ -271,7 +272,7 @@ def load_spikes_data(file_info, min_amp=0, base_dir: str | Path | None = None):
 
     return sf, spikes_data_list, layout_list, start_times, end_times
 
-def load_spikes_npz(file_info, min_amp=0, base_dir: str | Path | None = None):
+def load_spikes_npz(file_info, min_amp=0, base_dir: Optional[Union[str, Path]] = None):
     """Load spikes/layout data from ``.npz`` files described in ``file_info``.
 
     ``file_info`` entries are tuples of (folder_or_div, start_time, end_time, well).

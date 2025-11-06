@@ -137,7 +137,9 @@ class LayoutGridPlotter:
         if interpolate:
             grid_avg = self._interpolate_grid(grid_avg, gc, x_min, y_min, grid_size)
         # Mark remaining empty cells as NaN to avoid LogNorm issues and visual blocks
-        grid_avg[gc == 0] = np.nan
+        mask_empty = gc == 0
+        if not interpolate:
+            grid_avg[mask_empty] = np.nan
         # LogNorm safety
         valid_vals = grid_avg[np.isfinite(grid_avg) & (grid_avg > 1e-6)]
         if valid_vals.size == 0:
@@ -217,7 +219,9 @@ class LayoutGridPlotter:
                 grid_avg = np.divide(grid, gc, where=gc != 0)
             if interpolate:
                 grid_avg = self._interpolate_grid(grid_avg, gc, x_min, y_min, grid_size)
-            grid_avg[gc == 0] = np.nan
+            mask_empty = gc == 0
+            if not interpolate:
+                grid_avg[mask_empty] = np.nan
             valid_vals = grid_avg[np.isfinite(grid_avg) & (grid_avg > 1e-6)]
             if valid_vals.size == 0:
                 vmin, vmax = 1e-6, 1e-6

@@ -109,7 +109,7 @@ if __name__ == "__main__":
 
 
     # Load recordings; keep all spikes intact (no upfront filtering)
-    data_root = Path(os.environ.get('EPHAX_DATA_ROOT', '/Users/danielrebbin/Documents/Academia/UvA/Internship/Wes_Files/Data'))
+    data_root = Path(os.environ.get('EPHAX_DATA_ROOT', '/Users/danielrebbin/Documents/Academia/UvA/Internship/Wes_Files/Data/Stimulation'))
     ds = RestingActivityDataset.from_file_info(file_info, source='h5', min_amp=0, base_dir=data_root)
 
     shuffle_layout_coordinates = True  # Also randomize physical coordinates across electrodes

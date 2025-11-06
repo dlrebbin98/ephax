@@ -5,7 +5,7 @@ warnings.filterwarnings("ignore", message="RuntimeWarning: overflow encountered"
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Tuple, Literal, Optional
+from typing import Iterable, List, Tuple, Literal, Optional, Union
 
 import numpy as np
 
@@ -161,7 +161,7 @@ class RestingActivityDataset:
         file_info: Iterable[tuple],
         source: Literal["h5", "npz"] = "h5",
         min_amp: float = 0.0,
-        base_dir: str | Path | None = None,
+        base_dir: Optional[Union[str, Path]] = None,
     ) -> "RestingActivityDataset":
         if source == "h5":
             sf, spikes_data_list, layout_list, start_times, end_times = _load_spikes_data(
