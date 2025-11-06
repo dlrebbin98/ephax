@@ -1,3 +1,4 @@
+import os
 import h5py
 from pathlib import Path
 import numpy as np
@@ -202,7 +203,7 @@ def load_spikes(filename, well_no, min_amp=10):
         
     return spikes_data, event_data, layout, sf, stimulus_electrode
 
-def load_spikes_data(file_info, min_amp=0):
+def load_spikes_data(file_info, min_amp=0, base_dir: str | Path | None = None):
     """Load spikes data and layout for each file in ``file_info``.
 
     ``file_info`` entries are tuples of (folder, filename, start_time, end_time, well).
@@ -214,10 +215,28 @@ def load_spikes_data(file_info, min_amp=0):
     project_root = package_dir.parent
     cwd = Path.cwd()
 
+    data_roots = []
+    if base_dir is not None:
+        base_path = Path(base_dir).expanduser()
+        data_roots.append(base_path)
+    env_root = os.environ.get("EPHAX_DATA_ROOT")
+    if env_root:
+        data_roots.append(Path(env_root).expanduser())
+    legacy_base = Path("/Users/danielrebbin/Documents/Academia/UvA/Internship/Wes_Files/Data")
+    if legacy_base.exists():
+        data_roots.append(legacy_base)
+    package_data = project_root / "data"
+    if package_data.exists():
+        data_roots.append(package_data)
+
     def resolve_folder(folder: str) -> Path:
         folder_path = Path(folder) if folder else Path()
         if folder_path.is_absolute() and folder_path.exists():
             return folder_path
+        for root in data_roots:
+            candidate = root / folder_path
+            if candidate.exists():
+                return candidate
         candidates = [
             cwd / folder_path,
             package_dir / folder_path,
@@ -236,7 +255,9 @@ def load_spikes_data(file_info, min_amp=0):
 
     for folder, filename, start_time, end_time, well in file_info:
         folder_path = resolve_folder(folder)
-        h5_path = folder_path / filename
+        h5_path = folder_path / filename if folder_path.is_dir() else folder_path
+        if h5_path.is_dir():
+            h5_path = h5_path / filename
         if not h5_path.exists():
             raise FileNotFoundError(f"Couldn't locate recording file: {h5_path}")
         spikes_data, _, layout, sf, _ = load_spikes(str(h5_path), well, min_amp=min_amp)
@@ -250,7 +271,7 @@ def load_spikes_data(file_info, min_amp=0):
 
     return sf, spikes_data_list, layout_list, start_times, end_times
 
-def load_spikes_npz(file_info, min_amp=0):
+def load_spikes_npz(file_info, min_amp=0, base_dir: str | Path | None = None):
     """Load spikes/layout data from ``.npz`` files described in ``file_info``.
 
     ``file_info`` entries are tuples of (folder_or_div, start_time, end_time, well).
@@ -261,13 +282,27 @@ def load_spikes_npz(file_info, min_amp=0):
     project_root = package_dir.parent
     cwd = Path.cwd()
 
+    data_roots = []
+    if base_dir is not None:
+        data_roots.append(Path(base_dir).expanduser())
+    env_root = os.environ.get("EPHAX_DATA_ROOT")
+    if env_root:
+        data_roots.append(Path(env_root).expanduser())
+    legacy_base = Path("/Users/danielrebbin/Documents/Academia/UvA/Internship/Wes_Files/Data")
+    if legacy_base.exists():
+        data_roots.append(legacy_base)
+    package_data = project_root / "data"
+    if package_data.exists():
+        data_roots.append(package_data)
+
     def resolve_npz(path_like: str) -> Path:
         candidate = Path(path_like)
         if candidate.suffix == '.npz' and candidate.exists():
             return candidate
         if candidate.is_absolute():
             return candidate
-        for base in (cwd, package_dir, project_root):
+        search_roots = [*data_roots, cwd, package_dir, project_root]
+        for base in search_roots:
             candidate_path = base / candidate
             if candidate_path.exists():
                 return candidate_path

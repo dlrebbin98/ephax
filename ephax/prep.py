@@ -4,6 +4,7 @@ warnings.filterwarnings("ignore", message="Intel MKL WARNING")
 warnings.filterwarnings("ignore", message="RuntimeWarning: overflow encountered")
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, List, Tuple, Literal, Optional
 
 import numpy as np
@@ -160,11 +161,20 @@ class RestingActivityDataset:
         file_info: Iterable[tuple],
         source: Literal["h5", "npz"] = "h5",
         min_amp: float = 0.0,
+        base_dir: str | Path | None = None,
     ) -> "RestingActivityDataset":
         if source == "h5":
-            sf, spikes_data_list, layout_list, start_times, end_times = _load_spikes_data(file_info, min_amp=min_amp)
+            sf, spikes_data_list, layout_list, start_times, end_times = _load_spikes_data(
+                file_info,
+                min_amp=min_amp,
+                base_dir=base_dir,
+            )
         elif source == "npz":
-            sf, spikes_data_list, layout_list, start_times, end_times = _load_spikes_npz(file_info, min_amp=min_amp)
+            sf, spikes_data_list, layout_list, start_times, end_times = _load_spikes_npz(
+                file_info,
+                min_amp=min_amp,
+                base_dir=base_dir,
+            )
         else:
             raise ValueError("source must be 'h5' or 'npz'")
 
