@@ -1,4 +1,5 @@
 import h5py
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import re
@@ -202,90 +203,127 @@ def load_spikes(filename, well_no, min_amp=10):
     return spikes_data, event_data, layout, sf, stimulus_electrode
 
 def load_spikes_data(file_info, min_amp=0):
+    """Load spikes data and layout for each file in ``file_info``.
+
+    ``file_info`` entries are tuples of (folder, filename, start_time, end_time, well).
+    ``folder`` may be absolute or relative. Relative folders are resolved against
+    the current working directory, the package directory (``ephax/<folder>``),
+    and finally the project root (``<repo>/<folder>``).
     """
-    Load spikes data and layout for each file.
-    
-    """
+    package_dir = Path(__file__).resolve().parent
+    project_root = package_dir.parent
+    cwd = Path.cwd()
+
+    def resolve_folder(folder: str) -> Path:
+        folder_path = Path(folder) if folder else Path()
+        if folder_path.is_absolute() and folder_path.exists():
+            return folder_path
+        candidates = [
+            cwd / folder_path,
+            package_dir / folder_path,
+            project_root / folder_path,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return cwd / folder_path
+
     spikes_data_list = []
     layout_list = []
     start_times = []
     end_times = []
+    sf = None
 
     for folder, filename, start_time, end_time, well in file_info:
-        directory = f'/Users/danielrebbin/Documents/Academia/UvA/Internship/Wes_Files/Data/Stimulation/{folder}/'
-        path = directory + filename
-        spikes_data, _, layout, sf, _ = load_spikes(path, well, min_amp=min_amp)
+        folder_path = resolve_folder(folder)
+        h5_path = folder_path / filename
+        if not h5_path.exists():
+            raise FileNotFoundError(f"Couldn't locate recording file: {h5_path}")
+        spikes_data, _, layout, sf, _ = load_spikes(str(h5_path), well, min_amp=min_amp)
         spikes_data_list.append(spikes_data)
         layout_list.append(layout)
         start_times.append(start_time)
         end_times.append(end_time)
 
+    if sf is None:
+        raise ValueError("No recordings loaded; check file_info entries.")
+
     return sf, spikes_data_list, layout_list, start_times, end_times
 
 def load_spikes_npz(file_info, min_amp=0):
+    """Load spikes/layout data from ``.npz`` files described in ``file_info``.
+
+    ``file_info`` entries are tuples of (folder_or_div, start_time, end_time, well).
+    When ``folder_or_div`` refers to a directory, the loader searches relative to the
+    current working directory and package directory for ``*.npz`` files.
     """
-    Load spikes data and layout for each file based on file_info.
-    
-    Parameters:
-        file_info (list): List of tuples containing (div, well, start_time, end_time).
-    
-    Returns:
-        sf (float): Sampling frequency.
-        spikes_data_list (list): List of spikes data dictionaries for each well.
-        layout_list (list): List of layout dictionaries for each well.
-        start_times (list): List of start times for each well.
-        end_times (list): List of end times for each well.
-    """
-    wd = "/Users/danielrebbin/Documents/Academia/UvA/Internship/Wes_Files/Data/Wave Training Analysis/ProcessedData/"
+    package_dir = Path(__file__).resolve().parent
+    project_root = package_dir.parent
+    cwd = Path.cwd()
+
+    def resolve_npz(path_like: str) -> Path:
+        candidate = Path(path_like)
+        if candidate.suffix == '.npz' and candidate.exists():
+            return candidate
+        if candidate.is_absolute():
+            return candidate
+        for base in (cwd, package_dir, project_root):
+            candidate_path = base / candidate
+            if candidate_path.exists():
+                return candidate_path
+        return cwd / candidate
+
     spikes_data_list = []
     layout_list = []
     start_times = []
     end_times = []
+    sf = None
 
-    for div, start_time, end_time, well in file_info:
-        # Construct the file path
-        filename = f"DIV{div}_stim_removal_well_{well}_exp_data.npz"
-        path = f"{wd}{filename}"
-        
-        # Load the data
-        data = np.load(path)
+    for folder_or_div, start_time, end_time, well in file_info:
+        entry = Path(folder_or_div)
+        if entry.suffix == '.npz' or entry.exists():
+            npz_path = resolve_npz(folder_or_div)
+        else:
+            filename = f"DIV{folder_or_div}_stim_removal_well_{well}_exp_data.npz"
+            npz_path = resolve_npz(filename)
+        if not npz_path.exists():
+            raise FileNotFoundError(f"Couldn't locate npz file: {npz_path}")
+
+        data = np.load(npz_path)
         sf = data['samp_rate']
-        
-        # Extract layout
+
         layout = {
             'channel': data['channelmap'][:, 0],
             'electrode': data['channelmap'][:, 2],
             'x': data['channelmap'][:, 3],
-            'y': data['channelmap'][:, 4]
+            'y': data['channelmap'][:, 4],
         }
-        
-        # Create a channel-to-electrode mapping
+
         channel_to_electrode = {ch: el for ch, el in zip(layout['channel'], layout['electrode'])}
-        
-        # Extract spikes data
+
         times = data['spike_data']['frameno'] / sf
         channels = data['spike_data']['channel']
         amplitudes = np.abs(data['spike_data']['amplitude'])
         electrodes = [channel_to_electrode.get(ch, None) for ch in channels]
 
-        # Build masks: amplitude threshold and valid electrode mapping
         amp_mask = amplitudes >= min_amp
         valid_elec_mask = np.array([e is not None for e in electrodes])
         mask = amp_mask & valid_elec_mask
 
-        # Apply mask and ensure numeric dtype for electrodes
         spikes_data = {
             'time': np.asarray(times)[mask],
             'channel': np.asarray(channels)[mask],
             'amplitude': np.asarray(amplitudes)[mask],
-            'electrode': np.asarray([int(e) for e in np.asarray(electrodes)[mask]])
+            'electrode': np.asarray([int(e) for e in np.asarray(electrodes)[mask]]),
         }
-        
-        # Append to lists
+
         spikes_data_list.append(spikes_data)
         layout_list.append(layout)
         start_times.append(start_time)
         end_times.append(end_time)
+
+    if sf is None:
+        raise ValueError("No npz recordings loaded; check file_info entries.")
 
     return sf, spikes_data_list, layout_list, start_times, end_times
 

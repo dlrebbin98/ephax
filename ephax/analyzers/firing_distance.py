@@ -218,9 +218,10 @@ class FiringDistanceAnalyzer:
             current_gamma = current_gamma[:-1]
 
         # Model comparisons against reduced components
-            residuals_dict: Dict[str, np.ndarray] = {}
-            log_l_map: Dict[str, float] = {}
-            bic_map: Dict[str, float] = {}
+        residuals_dict: Dict[str, np.ndarray] = {}
+        log_l_map: Dict[str, float] = {}
+        bic_map: Dict[str, float] = {}
+        mi_map: Dict[str, float] = {}
         labels: List[str] = []
 
         for gammas, curve in model_curves:
