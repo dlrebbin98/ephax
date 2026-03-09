@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm, Normalize
 from scipy.interpolate import griddata
 
 from ..prep import RestingActivityDataset
@@ -28,6 +28,21 @@ class LayoutGridPlotter:
 
     def __init__(self, dataset: RestingActivityDataset) -> None:
         self.ds = dataset
+
+    @staticmethod
+    def _sanitize_for_plot(grid: np.ndarray) -> np.ndarray:
+        arr = np.asarray(grid, dtype=float).copy()
+        arr[~np.isfinite(arr)] = np.nan
+        arr[arr <= 0] = np.nan
+        return arr
+
+    @staticmethod
+    def _build_norm(vmin: float, vmax: float):
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin <= 0 or vmax <= 0 or vmax <= vmin:
+            safe_vmin = 0.0 if not np.isfinite(vmin) else float(min(vmin, vmax if np.isfinite(vmax) else vmin))
+            safe_vmax = 1.0 if not np.isfinite(vmax) else float(max(vmax, safe_vmin + 1e-6))
+            return Normalize(vmin=safe_vmin, vmax=safe_vmax)
+        return LogNorm(vmin=float(vmin), vmax=float(vmax))
 
     @staticmethod
     def _interpolate_grid(
@@ -133,7 +148,10 @@ class LayoutGridPlotter:
                 grid[ix, iy] += rate
                 gc[ix, iy] += 1
         with np.errstate(invalid='ignore', divide='ignore'):
-            grid_avg = np.divide(grid, gc, where=gc != 0)
+            # Important: initialize empty cells to NaN to avoid uninitialized
+            # memory values when using np.divide(..., where=...).
+            grid_avg = np.full_like(grid, np.nan, dtype=float)
+            np.divide(grid, gc, out=grid_avg, where=gc != 0)
         if interpolate:
             grid_avg = self._interpolate_grid(grid_avg, gc, x_min, y_min, grid_size)
         # Mark remaining empty cells as NaN to avoid LogNorm issues and visual blocks
@@ -148,21 +166,29 @@ class LayoutGridPlotter:
             vmin, vmax = float(valid_vals.min()), float(valid_vals.max())
         return GridResult(grid=grid_avg, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max, vmin=vmin, vmax=vmax)
 
-    def plot_grid_avghz_pooled(self, grid_size: float = 50.0, interpolate: bool = False):
+    def plot_grid_avghz_pooled(
+        self,
+        grid_size: float = 50.0,
+        interpolate: bool = False,
+        title: Optional[str] = None,
+    ):
         res = self.compute_grid_avghz_pooled(grid_size=grid_size, interpolate=interpolate)
         fig, ax = plt.subplots(figsize=(10, 6))
-        vmin = max(res.vmin, 1e-6)
-        vmax = max(res.vmax, vmin)
-        if vmax <= vmin:
-            vmax = vmin * 1.01
-        norm = LogNorm(vmin=vmin, vmax=vmax)
+        grid_plot = self._sanitize_for_plot(res.grid)
+        finite_vals = grid_plot[np.isfinite(grid_plot)]
+        if finite_vals.size:
+            vmin = float(np.nanmin(finite_vals))
+            vmax = float(np.nanmax(finite_vals))
+        else:
+            vmin, vmax = np.nan, np.nan
+        norm = self._build_norm(vmin, vmax)
         cmap = plt.get_cmap('magma').copy()
         cmap.set_bad('black')
-        cax = ax.imshow(res.grid.T, origin='lower', cmap=cmap, norm=norm,
+        cax = ax.imshow(grid_plot.T, origin='lower', cmap=cmap, norm=norm,
                         extent=[res.x_min, res.x_max, res.y_min, res.y_max])
         ax.set_xlabel('X-coordinate ($\\mu m$)')
         ax.set_ylabel('Y-coordinate ($\\mu m$)')
-        ax.set_title('Average Firing Rate (pooled)')
+        ax.set_title(title or 'Average Firing Rate (pooled)')
         ax.set_facecolor('black')
         cbar = fig.colorbar(cax, ax=ax, orientation='vertical')
         cbar.set_label('Average Firing Rate (Hz)')
@@ -216,7 +242,10 @@ class LayoutGridPlotter:
                     grid[ix, iy] += r
                     gc[ix, iy] += 1
             with np.errstate(invalid='ignore', divide='ignore'):
-                grid_avg = np.divide(grid, gc, where=gc != 0)
+                # Important: initialize empty cells to NaN to avoid uninitialized
+                # memory values when using np.divide(..., where=...).
+                grid_avg = np.full_like(grid, np.nan, dtype=float)
+                np.divide(grid, gc, out=grid_avg, where=gc != 0)
             if interpolate:
                 grid_avg = self._interpolate_grid(grid_avg, gc, x_min, y_min, grid_size)
             mask_empty = gc == 0
@@ -230,7 +259,14 @@ class LayoutGridPlotter:
             results.append(GridResult(grid=grid_avg, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max, vmin=vmin, vmax=vmax))
         return results
 
-    def plot_grid_avghz_panel(self, grid_size: float = 50.0, ncols: int = 3, interpolate: bool = False):
+    def plot_grid_avghz_panel(
+        self,
+        grid_size: float = 50.0,
+        ncols: int = 3,
+        interpolate: bool = False,
+        title: Optional[str] = None,
+        recording_titles: Optional[Sequence[str] | Callable[[int], str]] = None,
+    ):
         grids = self.compute_grid_avghz_per_recording(grid_size=grid_size, interpolate=interpolate)
         if not grids:
             print("No data to plot.")
@@ -247,14 +283,15 @@ class LayoutGridPlotter:
                 all_vals.append(vals)
         if all_vals:
             concat = np.concatenate(all_vals)
-            global_vmin = float(max(1e-6, np.min(concat)))
-            global_vmax = float(max(global_vmin, np.max(concat)))
+            concat = concat[np.isfinite(concat) & (concat > 0)]
+            if concat.size:
+                global_vmin = float(np.min(concat))
+                global_vmax = float(np.max(concat))
+            else:
+                global_vmin = global_vmax = np.nan
         else:
-            global_vmin = global_vmax = 1e-6
-        # Ensure proper bounds for LogNorm
-        if global_vmax <= global_vmin:
-            global_vmax = global_vmin * 1.01
-        norm = LogNorm(vmin=global_vmin, vmax=global_vmax)
+            global_vmin = global_vmax = np.nan
+        norm = self._build_norm(global_vmin, global_vmax)
         idx = 0
         last_im = None
         for r in range(nrows):
@@ -262,11 +299,21 @@ class LayoutGridPlotter:
                 ax = axes[r, c]
                 if idx < n:
                     res = grids[idx]
+                    grid_plot = self._sanitize_for_plot(res.grid)
                     cmap = plt.get_cmap('magma').copy()
                     cmap.set_bad('black')
-                    last_im = ax.imshow(res.grid.T, origin='lower', cmap=cmap, norm=norm,
+                    last_im = ax.imshow(grid_plot.T, origin='lower', cmap=cmap, norm=norm,
                                         extent=[res.x_min, res.x_max, res.y_min, res.y_max])
-                    ax.set_title(f'Recording {idx+1}')
+                    rec_title = None
+                    if recording_titles is not None:
+                        if callable(recording_titles):
+                            rec_title = recording_titles(idx)
+                        elif idx < len(recording_titles):
+                            rec_title = recording_titles[idx]
+                    if rec_title:
+                        ax.set_title(str(rec_title))
+                    else:
+                        ax.set_title(f'Recording {idx+1}')
                     # Match averaged plot background
                     ax.set_facecolor('black')
                 else:
@@ -275,7 +322,11 @@ class LayoutGridPlotter:
                 ax.set_xlabel('X ($\\mu m$)')
                 ax.set_ylabel('Y ($\\mu m$)')
                 idx += 1
-        fig.tight_layout()
+        if title:
+            fig.suptitle(title)
+            fig.tight_layout(rect=[0, 0, 1, 0.97])
+        else:
+            fig.tight_layout()
         # Single shared colorbar for all panels
         if last_im is not None:
             fig.colorbar(last_im, ax=axes.ravel().tolist(), orientation='vertical', label='Average Firing Rate (Hz)')
