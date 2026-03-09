@@ -80,10 +80,37 @@ def _proc_theta(spikes_data_list, layout_list, ref_electrode, start_times, end_t
 
 def _proc_grid(spikes_data_list, layout_list, ref_electrode, start_times, end_times, window_size, delays, verbose: bool = False):
     """Legacy-equivalent: bin mean co-firing proportions per spatial grid cell."""
-    grid_size = None
-    heatmap_data_sum = None
-    count_data = None
-    x_bins = y_bins = None
+    grid_step_um = 100.0
+    # Build one shared grid for all recordings to keep binned arrays shape-consistent.
+    all_xmin, all_xmax, all_ymin, all_ymax = [], [], [], []
+    for layout in layout_list:
+        ldf = pd.DataFrame(layout)
+        if ldf.empty or "x" not in ldf.columns or "y" not in ldf.columns:
+            continue
+        all_xmin.append(float(ldf["x"].min()))
+        all_xmax.append(float(ldf["x"].max()))
+        all_ymin.append(float(ldf["y"].min()))
+        all_ymax.append(float(ldf["y"].max()))
+
+    if not all_xmin or not all_ymin:
+        empty = np.zeros((len(delays), 1, 1), dtype=float)
+        return empty, np.array([0.0, grid_step_um]), np.array([0.0, grid_step_um])
+
+    x_min = float(np.min(all_xmin))
+    x_max = float(np.max(all_xmax))
+    y_min = float(np.min(all_ymin))
+    y_max = float(np.max(all_ymax))
+    if np.isclose(x_min, x_max):
+        x_max = x_min + grid_step_um
+    if np.isclose(y_min, y_max):
+        y_max = y_min + grid_step_um
+
+    x_bins = np.arange(x_min, x_max + grid_step_um, grid_step_um)
+    y_bins = np.arange(y_min, y_max + grid_step_um, grid_step_um)
+    grid_size = (len(y_bins) - 1, len(x_bins) - 1)
+    heatmap_data_sum = np.zeros((len(delays), *grid_size), dtype=float)
+    count_data = np.zeros((len(delays), *grid_size), dtype=float)
+
     for spikes_data, layout, st, et in zip(spikes_data_list, layout_list, start_times, end_times):
         spikes_df = pd.DataFrame(spikes_data)
         layout_df = pd.DataFrame(layout)
@@ -95,15 +122,6 @@ def _proc_grid(spikes_data_list, layout_list, ref_electrode, start_times, end_ti
         spikes_df, layout_df = assign_r_distance(spikes_df, layout_df, ref_electrode)
         spikes_df_during = spikes_df[(spikes_df['time'] >= float(st)) & (spikes_df['time'] <= float(et))]
         firing_times = spikes_df_during['time'][spikes_df_during['electrode'] == ref_electrode]
-        # grid bins
-        x_min, x_max = layout_df['x'].min(), layout_df['x'].max()
-        y_min, y_max = layout_df['y'].min(), layout_df['y'].max()
-        x_bins = np.arange(x_min, x_max + 100, 100)
-        y_bins = np.arange(y_min, y_max + 100, 100)
-        if grid_size is None:
-            grid_size = (len(y_bins) - 1, len(x_bins) - 1)
-            heatmap_data_sum = np.zeros((len(delays), *grid_size))
-            count_data = np.zeros((len(delays), *grid_size))
         # Precompute coordinate lookup once per recording
         coords = layout_df.set_index('electrode')[['x', 'y']]
         for i, delay in enumerate(delays):

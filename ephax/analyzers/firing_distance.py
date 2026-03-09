@@ -54,6 +54,7 @@ class FiringDistanceAnalyzer:
         dataset_perm: RestingActivityDataset | None = None,
         refs_per_recording: Optional[List[np.ndarray]] = None,
         selection_prep_config: Optional[PrepConfig] = None,
+        ifr_config: Optional[IFRConfig] = None,
         # Default model parameters for synergy overlays
         v_eph: float = 0.1,
         v_ax: float = 0.45,
@@ -65,6 +66,7 @@ class FiringDistanceAnalyzer:
         self._stored_refs: Optional[List[np.ndarray]] = refs_per_recording
         self._stored_refs_perm: Optional[List[np.ndarray]] = None
         self._selection_cfg: Optional[PrepConfig] = selection_prep_config
+        self._ifr_cfg: IFRConfig = ifr_config or IFRConfig(log_scale=True)
         # Store default model parameters
         self.v_eph = float(v_eph)
         self.v_ax = float(v_ax)
@@ -345,9 +347,9 @@ class FiringDistanceAnalyzer:
         spikes_list, layout_list, start_times, end_times = self.ds.to_legacy()
         # Build IFR analyzer that respects the same electrode selection policy
         if self._selection_cfg is not None:
-            ifr = IFRAnalyzer.from_dataset(self.ds, config=IFRConfig(log_scale=True), selection_prep_config=self._selection_cfg)
+            ifr = IFRAnalyzer.from_dataset(self.ds, config=self._ifr_cfg, selection_prep_config=self._selection_cfg)
         else:
-            ifr = IFRAnalyzer(spikes_list, start_times, end_times, config=IFRConfig(log_scale=True))
+            ifr = IFRAnalyzer(spikes_list, start_times, end_times, config=self._ifr_cfg)
             # Fall back to stored refs computed in __init__
             ifr._refs_per_recording = self._stored_refs
         peaks = ifr.peaks()
