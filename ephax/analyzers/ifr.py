@@ -9,7 +9,6 @@ from typing import Callable, Iterable, Optional, Sequence
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib import ticker as mticker
 
 from ..compute import ifr_peaks, fit_ifr_gmm
 from ..models import IFRPeaks, GMMFit, CofiringHeatmap
@@ -33,8 +32,6 @@ class IFRConfig:
     log_scale: bool = True
     n_components: Optional[int] = None
     random_state: int = 0
-    # Visualization defaults
-    hist_bins: int = 100
     overlay_gmm: bool = True
     show_kde: bool = False
     show_peaks: bool = False
@@ -101,59 +98,15 @@ class IFRAnalyzer:
         vals = values if values is not None else self.peaks().values
         return fit_ifr_gmm(vals, log_scale=self.cfg.log_scale, n_components=self.cfg.n_components)
 
-    @staticmethod
-    def _log10_hz_ticks(vmin: float, vmax: float) -> tuple[np.ndarray, np.ndarray]:
-        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax < vmin:
-            return np.array([]), np.array([])
-        lo = int(np.floor(vmin))
-        hi = int(np.ceil(vmax))
-        majors = np.arange(lo, hi + 1, dtype=float)
-        minors = []
-        for exp in range(lo - 1, hi + 1):
-            for mult in range(2, 10):
-                tick = np.log10(mult) + exp
-                if vmin <= tick <= vmax:
-                    minors.append(tick)
-        return majors, np.asarray(minors, dtype=float)
-
-    @staticmethod
-    def _format_log10_hz(value: float, _pos=None) -> str:
-        if not np.isfinite(value):
-            return ""
-        hz = 10 ** value
-        if hz >= 100:
-            return f"{hz:.0f}"
-        if hz >= 10:
-            return f"{hz:.1f}".rstrip("0").rstrip(".")
-        return f"{hz:.2f}".rstrip("0").rstrip(".")
-
-    def _apply_log10_hz_ticks(self, axis, vmin: float, vmax: float, which: str = "x") -> None:
-        majors, minors = self._log10_hz_ticks(vmin, vmax)
-        locator_major = mticker.FixedLocator(majors)
-        locator_minor = mticker.FixedLocator(minors)
-        formatter = mticker.FuncFormatter(self._format_log10_hz)
-        null_formatter = mticker.NullFormatter()
-
-        if which == "x":
-            axis.xaxis.set_major_locator(locator_major)
-            axis.xaxis.set_minor_locator(locator_minor)
-            axis.xaxis.set_major_formatter(formatter)
-            axis.xaxis.set_minor_formatter(null_formatter)
-        else:
-            axis.yaxis.set_major_locator(locator_major)
-            axis.yaxis.set_minor_locator(locator_minor)
-            axis.yaxis.set_major_formatter(formatter)
-            axis.yaxis.set_minor_formatter(null_formatter)
-
     # Viz
-    def plot_histogram(self, show: bool = False, ax=None):
+    def plot_histogram(self, hist_bins: int = 100,show: bool = False, ax=None):
         """Plot pooled IFR histogram with optional KDE/peaks and GMM overlay."""
         peaks = self.peaks()
         vals = peaks.values
         x = peaks.kde_x
         y = peaks.kde_y
         fig, ax = (plt.gcf(), ax) if ax is not None else plt.subplots(figsize=(10, 6))
-        ax.hist(vals, bins=self.cfg.hist_bins, density=True, alpha=0.3, color="0.7", label="Data Histogram")
+        ax.hist(vals, bins=hist_bins, density=True, alpha=0.3, color="0.7", label="Data Histogram")
         if self.cfg.show_kde:
             ax.plot(x, y, color="k", lw=2, label="KDE")
         if self.cfg.show_peaks and len(peaks.peaks_x) > 0:
@@ -273,8 +226,8 @@ class IFRAnalyzer:
             ax1.set_xlabel("Time (s)")
             ax1.set_ylabel("Channel by Firing Frequency Rank")
             if self.cfg.log_scale:
-                base_title = f"Instantaneous Firing Rate Across Top {len(valid_electrodes)} electrodes"
-                cbar_label = "Instantaneous Firing Rate (Hz, log scale)"
+                base_title = f"Log Instantaneous Firing Rate Across Top {len(valid_electrodes)} electrodes"
+                cbar_label = "Log Instantaneous Firing Rate (Hz)"
             else:
                 base_title = f"Instantaneous Firing Rate Across Top {len(valid_electrodes)} electrodes"
                 cbar_label = "Instantaneous Firing Rate (Hz)"
@@ -287,8 +240,6 @@ class IFRAnalyzer:
             ax1.set_yticklabels([1, len(valid_electrodes)])
             cbar = fig.colorbar(im, ax=ax1)
             cbar.set_label(cbar_label)
-            if self.cfg.log_scale:
-                self._apply_log10_hz_ticks(cbar.ax, float(np.nanmin(H)), float(np.nanmax(H)), which="y")
 
             # Histogram
             hist_vals = all_ifr_values.copy()
@@ -296,11 +247,13 @@ class IFRAnalyzer:
                 hist_vals = hist_vals[hist_vals > 1e-3]
                 hist_vals = np.log10(hist_vals)
             ax2.hist(hist_vals, bins=self.cfg.ts_bins, color="blue", edgecolor="black")
-            ax2.set_xlabel("Instantaneous Firing Rate (Hz)" if not self.cfg.log_scale else "Instantaneous Firing Rate (Hz, log scale)")
+            ticks = ax2.get_xticks()
+            ax2.set_xticks(ticks)
+            labels = [f'$10^{{{int(x)}}}$' if x.is_integer() else f'$10^{{{x:.1f}}}$' for x in ticks]
+            ax2.set_xticklabels(labels)
+            ax2.set_xlabel("Instantaneous Firing Rate (Hz)" if not self.cfg.log_scale else "Log Instantaneous Firing Rate (Hz)")
             ax2.set_ylabel("Frequency")
             ax2.set_title("Histogram of Instantaneous Firing Rates")
-            if self.cfg.log_scale and hist_vals.size:
-                self._apply_log10_hz_ticks(ax2, float(np.nanmin(hist_vals)), float(np.nanmax(hist_vals)), which="x")
             plt.tight_layout()
             results.append((fig, (ax1, ax2)))
         return results
