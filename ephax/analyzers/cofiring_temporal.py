@@ -18,6 +18,11 @@ from ..compute import cofiring_proportions as _cofiring_proportions
 from matplotlib.cm import get_cmap
 from scipy.stats import binned_statistic_2d
 
+DEFAULT_ARRAY_X_MIN_UM = 0.0
+DEFAULT_ARRAY_Y_MIN_UM = 0.0
+DEFAULT_ARRAY_X_MAX_UM = 3850.0
+DEFAULT_ARRAY_Y_MAX_UM = 2100.0
+
 # Local legacy-equivalent helpers (integrated from resting_activity)
 def _norm_t0(heatmap_data: np.ndarray, delays: np.ndarray) -> np.ndarray:
     t0_index = np.where(delays == 0)[0]
@@ -81,32 +86,8 @@ def _proc_theta(spikes_data_list, layout_list, ref_electrode, start_times, end_t
 def _proc_grid(spikes_data_list, layout_list, ref_electrode, start_times, end_times, window_size, delays, verbose: bool = False):
     """Legacy-equivalent: bin mean co-firing proportions per spatial grid cell."""
     grid_step_um = 100.0
-    # Build one shared grid for all recordings to keep binned arrays shape-consistent.
-    all_xmin, all_xmax, all_ymin, all_ymax = [], [], [], []
-    for layout in layout_list:
-        ldf = pd.DataFrame(layout)
-        if ldf.empty or "x" not in ldf.columns or "y" not in ldf.columns:
-            continue
-        all_xmin.append(float(ldf["x"].min()))
-        all_xmax.append(float(ldf["x"].max()))
-        all_ymin.append(float(ldf["y"].min()))
-        all_ymax.append(float(ldf["y"].max()))
-
-    if not all_xmin or not all_ymin:
-        empty = np.zeros((len(delays), 1, 1), dtype=float)
-        return empty, np.array([0.0, grid_step_um]), np.array([0.0, grid_step_um])
-
-    x_min = float(np.min(all_xmin))
-    x_max = float(np.max(all_xmax))
-    y_min = float(np.min(all_ymin))
-    y_max = float(np.max(all_ymax))
-    if np.isclose(x_min, x_max):
-        x_max = x_min + grid_step_um
-    if np.isclose(y_min, y_max):
-        y_max = y_min + grid_step_um
-
-    x_bins = np.arange(x_min, x_max + grid_step_um, grid_step_um)
-    y_bins = np.arange(y_min, y_max + grid_step_um, grid_step_um)
+    x_bins = np.arange(DEFAULT_ARRAY_X_MIN_UM, DEFAULT_ARRAY_X_MAX_UM + grid_step_um, grid_step_um)
+    y_bins = np.arange(DEFAULT_ARRAY_Y_MIN_UM, DEFAULT_ARRAY_Y_MAX_UM + grid_step_um, grid_step_um)
     grid_size = (len(y_bins) - 1, len(x_bins) - 1)
     heatmap_data_sum = np.zeros((len(delays), *grid_size), dtype=float)
     count_data = np.zeros((len(delays), *grid_size), dtype=float)
@@ -341,10 +322,8 @@ class CofiringTemporalAnalyzer:
         mask_t = (sdf['time'] >= s) & (sdf['time'] <= e)
         sdf = sdf[mask_t].copy()
         # Grid bins
-        x_min, x_max = float(ldf['x'].min()), float(ldf['x'].max())
-        y_min, y_max = float(ldf['y'].min()), float(ldf['y'].max())
-        x_bins = np.arange(x_min, x_max + 100, 100)
-        y_bins = np.arange(y_min, y_max + 100, 100)
+        x_bins = np.arange(DEFAULT_ARRAY_X_MIN_UM, DEFAULT_ARRAY_X_MAX_UM + 100.0, 100.0)
+        y_bins = np.arange(DEFAULT_ARRAY_Y_MIN_UM, DEFAULT_ARRAY_Y_MAX_UM + 100.0, 100.0)
         cube = np.zeros((len(self.delays), len(y_bins) - 1, len(x_bins) - 1), dtype=float)
         count = np.zeros_like(cube)
         pm_sec = float(self.cfg.step_ms) / 1000.0

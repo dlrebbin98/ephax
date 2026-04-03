@@ -26,8 +26,27 @@ class GridResult:
 class LayoutGridPlotter:
     """Plots average firing-rate grids on the 2D electrode layout."""
 
+    DEFAULT_ARRAY_X_MIN_UM = 0.0
+    DEFAULT_ARRAY_Y_MIN_UM = 0.0
+    DEFAULT_ARRAY_X_MAX_UM = 3850.0
+    DEFAULT_ARRAY_Y_MAX_UM = 2100.0
+
     def __init__(self, dataset: RestingActivityDataset) -> None:
         self.ds = dataset
+
+    @staticmethod
+    def _grid_extents_from_layout(layout_df: pd.DataFrame, grid_size: float) -> Tuple[int, int, float, float, float, float, np.ndarray, np.ndarray]:
+        """Use fixed full-array extents for all layout-grid plots."""
+
+        x_min = LayoutGridPlotter.DEFAULT_ARRAY_X_MIN_UM
+        y_min = LayoutGridPlotter.DEFAULT_ARRAY_Y_MIN_UM
+        x_max = LayoutGridPlotter.DEFAULT_ARRAY_X_MAX_UM
+        y_max = LayoutGridPlotter.DEFAULT_ARRAY_Y_MAX_UM
+        x_bins = np.arange(x_min, x_max + grid_size, grid_size, dtype=float)
+        y_bins = np.arange(y_min, y_max + grid_size, grid_size, dtype=float)
+        x_n = max(1, len(x_bins) - 1)
+        y_n = max(1, len(y_bins) - 1)
+        return x_n, y_n, x_min, x_max, y_min, y_max, x_bins, y_bins
 
     @staticmethod
     def _sanitize_for_plot(grid: np.ndarray) -> np.ndarray:
@@ -121,6 +140,7 @@ class LayoutGridPlotter:
 
         avg_fr = {k: pooled[k] / counts[k] for k in pooled.keys()}
 
+        full_layout_df = layout_df.copy()
         # Filter layout to electrodes with rates
         valid_electrodes = set(avg_fr.keys())
         layout_df = layout_df[layout_df["electrode"].isin(valid_electrodes)].copy()
@@ -130,13 +150,11 @@ class LayoutGridPlotter:
         map_electrode = layout_df["electrode"].astype(int).to_numpy()
         map_rates = np.array([avg_fr[int(e)] for e in map_electrode], dtype=float)
 
-        # Define grid extents
-        x_n = int(np.ceil(float(map_x.max()) / grid_size)) - 1
-        y_n = int(np.ceil(float(map_y.max()) / grid_size)) - 1
-        x_min, x_max = 1.0, x_n * grid_size
-        y_min, y_max = 1.0, y_n * grid_size
-        x_bins = np.linspace(x_min, x_max, x_n + 1)
-        y_bins = np.linspace(y_min, y_max, y_n + 1)
+        # Preserve the full array footprint even if edge electrodes are silent.
+        x_n, y_n, x_min, x_max, y_min, y_max, x_bins, y_bins = self._grid_extents_from_layout(
+            full_layout_df,
+            grid_size,
+        )
 
         grid = np.zeros((x_n, y_n), dtype=float)
         gc = np.zeros((x_n, y_n), dtype=float)
@@ -203,14 +221,10 @@ class LayoutGridPlotter:
         # Establish extents from combined layout to keep consistent axes
         layout_df_all = [pd.DataFrame(rec.layout) for rec in self.ds.recordings]
         layout_all = pd.concat(layout_df_all, ignore_index=True)
-        x_max_all = float(layout_all['x'].max())
-        y_max_all = float(layout_all['y'].max())
-        x_n_all = int(np.ceil(x_max_all / grid_size)) - 1
-        y_n_all = int(np.ceil(y_max_all / grid_size)) - 1
-        x_min, x_max = 1.0, x_n_all * grid_size
-        y_min, y_max = 1.0, y_n_all * grid_size
-        x_bins_all = np.linspace(x_min, x_max, x_n_all + 1)
-        y_bins_all = np.linspace(y_min, y_max, y_n_all + 1)
+        x_n_all, y_n_all, x_min, x_max, y_min, y_max, x_bins_all, y_bins_all = self._grid_extents_from_layout(
+            layout_all,
+            grid_size,
+        )
 
         for rec in self.ds.recordings:
             s, e = rec.start_time, rec.end_time
