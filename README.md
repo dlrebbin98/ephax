@@ -6,6 +6,34 @@ ephaptic-axonal (ephax) interaction effects. The design is
 analyzer-first: you load a dataset once, select reference electrodes via a
 PrepConfig, and then use analyzer classes to compute and visualize results.
 
+## Installation
+
+From the repository root:
+
+```bash
+pip install -e ".[dev,notebook]"
+```
+
+Run the lightweight regression tests with:
+
+```bash
+pytest
+```
+
+## Reproducible Workflows
+
+YAML workflow configs live in `configs/`. They avoid hard-coded local data
+paths by using explicit `dataset.data_root` values or the `EPHAX_DATA_ROOT`
+environment variable.
+
+```bash
+ephax configs/stim_removal_null.yaml
+```
+
+Generated figures, GIFs, and analysis outputs should go under `outputs/`.
+Large recordings should stay outside the Python package; keep only small sample
+fixtures in the repo.
+
 ## Quick Start
 
 ```python
@@ -67,4 +95,3 @@ fd.plot_distance_hist_with_synergy(dist_vals, weights)
   pool outside the defined ranges.
 - The codebase prefers analyzer entry points; legacy wrappers in
   `resting_activity.py` have been removed.
-

@@ -9,8 +9,9 @@ import os as _os  # set MKL/OpenMP env vars before importing any deps that may l
 _os.environ.setdefault("KMP_WARNINGS", "0")
 _os.environ.setdefault("MKL_VERBOSE", "0")
 _os.environ.setdefault("MKL_DEBUG_CPU_TYPE", "5")
+_os.environ.setdefault("MPLCONFIGDIR", _os.path.join(_os.getcwd(), ".mpl-cache"))
 
-from . import compute, models, helper_functions  # re-export namespaces (avoid viz to prevent cycles)
+from . import compute, models, helper_functions, data_io  # re-export namespaces (avoid viz to prevent cycles)
 from .analyzers import IFRAnalyzer  # convenience import
 from .analyzers.ifr import IFRConfig  # expose IFR config like others
 from .prep import RestingActivityDataset, PrepConfig, Recording

@@ -1,0 +1,29 @@
+run:
+  seed: 0
+  n_jobs: 1
+  output_dir: outputs/quickstart
+
+dataset:
+  source: h5
+  data_root: ephax/data
+  min_amp: 0
+  file_info:
+    - folder: .
+      filename: well_0.raw.h5
+      start_time: 0
+      end_time: 600
+      well: 0
+
+selection:
+  mode: top
+  top_start: 10
+  top_stop: 110
+  top_use_recording_window: true
+  verbose: false
+
+analyses:
+  ifr:
+    enabled: true
+    log_scale: true
+    hist_bins: 100
+    overlay_gmm: true

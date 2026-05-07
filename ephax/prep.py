@@ -11,9 +11,9 @@ import numpy as np
 
 from .models import Layout
 
-# Reuse existing loaders for now; centralize here
-from ephax.helper_functions import load_spikes_data as _load_spikes_data
-from ephax.helper_functions import load_spikes_npz as _load_spikes_npz
+# Reuse compatibility loaders through the dedicated data I/O boundary.
+from ephax.data_io import load_spikes_data as _load_spikes_data
+from ephax.data_io import load_spikes_npz as _load_spikes_npz
 from ephax.helper_functions import get_activity_sorted_electrodes as _get_activity_sorted_electrodes
 
 
@@ -249,6 +249,8 @@ class RestingActivityDataset:
                 else:
                     present = np.unique(rec.spikes.get('electrode', np.array([], dtype=int)))
                     sel = np.intersect1d(provided, present, assume_unique=False)
+            else:
+                raise ValueError("Unsupported mode in PrepConfig: %r" % (cfg.mode,))
             if cfg.verbose:
                 total_elec = np.unique(rec.spikes["electrode"]).size
                 print("\nSelecting top electrodes by activity...")
@@ -256,8 +258,6 @@ class RestingActivityDataset:
                 if cfg.mode == "top":
                     print(f"Top range: start={cfg.top_start}, stop={cfg.top_stop}")
                 print(f"Selected electrodes: {sel.size}")
-            else:
-                raise ValueError("Unsupported mode in PrepConfig: %r" % (cfg.mode,))
 
             if sel.size == 0:
                 mask = np.zeros_like(rec.spikes["electrode"], dtype=bool)

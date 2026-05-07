@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ephax"
+version = "0.1.0"
+description = "Analyzer-first electrophysiology toolkit for MEA resting activity and stimulation analyses."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "h5py",
+    "imageio",
+    "joblib",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "scikit-learn",
+    "scipy",
+    "seaborn",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+notebook = [
+    "ipykernel",
+    "ipython",
+    "jupyter",
+]
+
+[project.scripts]
+ephax = "ephax.workflows:main"
+
+[tool.setuptools]
+packages = ["ephax", "ephax.analyzers"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

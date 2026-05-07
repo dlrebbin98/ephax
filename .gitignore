@@ -1,0 +1,31 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.mpl-cache/
+.mpl-cache-test/
+
+# Build/install artifacts
+build/
+dist/
+*.egg-info/
+
+# Generated analysis outputs
+outputs/
+GIFs/*.gif
+GIFs/**/*.gif
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.svg
+
+# Local data roots and scratch spaces
+data/
+!data/README.md
+!data/sample/
+!data/sample/**

@@ -1,0 +1,28 @@
+run:
+  seed: 0
+  n_jobs: 1
+  output_dir: outputs/stim_removal_null
+
+dataset:
+  source: npz
+  data_root: ephax/data/stimRemovalNull
+  min_amp: 0
+  file_info:
+    - path: well1/DIV12_240703_data_well1_exp_data.npz
+      start_time: 0
+      end_time: 600
+      well: 0
+
+selection:
+  mode: top
+  top_start: 0
+  top_stop: 300
+  top_use_recording_window: true
+  verbose: false
+
+analyses:
+  ifr:
+    enabled: true
+    log_scale: true
+    hist_bins: 100
+    overlay_gmm: true
