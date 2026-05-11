@@ -14,7 +14,7 @@ from .models import Layout
 # Reuse compatibility loaders through the dedicated data I/O boundary.
 from ephax.data_io import load_spikes_data as _load_spikes_data
 from ephax.data_io import load_spikes_npz as _load_spikes_npz
-from ephax.helper_functions import get_activity_sorted_electrodes as _get_activity_sorted_electrodes
+from ephax.preprocessing.selection import get_activity_sorted_electrodes as _get_activity_sorted_electrodes
 
 
 @dataclass

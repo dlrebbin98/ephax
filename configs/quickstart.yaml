@@ -1,7 +1,10 @@
 run:
+  id: quickstart_well0
   seed: 0
   n_jobs: 1
-  output_dir: outputs/quickstart
+  output_dir: outputs
+  figure_formats:
+    - png
 
 dataset:
   source: h5
@@ -10,6 +13,9 @@ dataset:
   file_info:
     - folder: .
       filename: well_0.raw.h5
+      recording_id: quickstart_well0
+      culture_id: quickstart
+      div:
       start_time: 0
       end_time: 600
       well: 0
@@ -27,3 +33,14 @@ analyses:
     log_scale: true
     hist_bins: 100
     overlay_gmm: true
+    write_timeseries_checkpoints: false
+  burst:
+    enabled: false
+    detector: rate_peak
+    network_bin_ms: 10.0
+    network_min_participation_fraction: 0.20
+    network_min_active_electrodes: 10
+  wave:
+    enabled: false
+  transfer_entropy:
+    enabled: false

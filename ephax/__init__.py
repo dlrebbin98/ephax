@@ -11,7 +11,7 @@ _os.environ.setdefault("MKL_VERBOSE", "0")
 _os.environ.setdefault("MKL_DEBUG_CPU_TYPE", "5")
 _os.environ.setdefault("MPLCONFIGDIR", _os.path.join(_os.getcwd(), ".mpl-cache"))
 
-from . import compute, models, helper_functions, data_io  # re-export namespaces (avoid viz to prevent cycles)
+from . import artifacts, compute, models, helper_functions, data_io, metrics, modeling, plotting, preprocessing  # re-export namespaces
 from .analyzers import IFRAnalyzer  # convenience import
 from .analyzers.ifr import IFRConfig  # expose IFR config like others
 from .prep import RestingActivityDataset, PrepConfig, Recording

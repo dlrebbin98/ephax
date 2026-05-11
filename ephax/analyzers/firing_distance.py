@@ -4,40 +4,25 @@ import warnings
 warnings.filterwarnings("ignore", message="Intel MKL WARNING")
 warnings.filterwarnings("ignore", message="RuntimeWarning: overflow encountered")
 
-from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.stats import binned_statistic, f_oneway, tukey_hsd, pearsonr
+from scipy.stats import f_oneway, tukey_hsd, pearsonr
 from scipy.optimize import curve_fit
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Patch
 from sklearn.feature_selection import mutual_info_regression
 
 from ..prep import RestingActivityDataset, PrepConfig
-from ..models import BinnedSeries
+from ..models import CofiringDistanceResult, FRDistanceResult
 from .ifr import IFRAnalyzer, IFRConfig
-from ephax.helper_functions import assign_r_distance_all, assign_r_distance, log_likelihood, likelihood_ratio_test
-from ephax.r_function import correlation_function
-from ..compute import cofiring_proportions
-
-
-@dataclass
-class FRDistanceResult:
-    distances: np.ndarray
-    rates: np.ndarray
-    bins: np.ndarray
-    binned: BinnedSeries
-
-
-@dataclass
-class CofiringDistanceResult:
-    distances: np.ndarray
-    proportions: np.ndarray
-    bins: np.ndarray
-    binned: BinnedSeries
+from ephax.modeling.ephaptic import correlation_function
+from ephax.modeling.likelihood import log_likelihood, likelihood_ratio_test
+from ephax.metrics.firing_distance import avg_rate_vs_distance as compute_avg_rate_vs_distance
+from ephax.metrics.firing_distance import cofiring_avg_vs_distance as compute_cofiring_avg_vs_distance
+from ephax.plotting.firing_distance import plot_binned_distance_series
 
 
 class FiringDistanceAnalyzer:
@@ -86,54 +71,19 @@ class FiringDistanceAnalyzer:
         min_distance: float = 50,
         max_distance: float = 3500,
     ) -> FRDistanceResult:
-        """Average firing rate vs distance, binned and aggregated across recordings."""
+        """Compute average firing rate vs distance for the dataset.
+
+        The pure computation lives in :mod:`ephax.metrics.firing_distance`; this
+        analyzer method only resolves the recording selection policy.
+        """
         refs = self._ensure_refs(refs_per_recording)
-        all_rates: List[float] = []
-        all_dists: List[float] = []
-
-        for rec, rlist in zip(self.ds.recordings, refs):
-            if rlist is None or len(rlist) == 0:
-                continue
-            spikes_df = pd.DataFrame(rec.spikes)
-            layout_df = pd.DataFrame(rec.layout)
-            spikes_df, distances_df = assign_r_distance_all(spikes_df, layout_df, rlist)
-
-            mask_t = (spikes_df["time"] >= rec.start_time) & (spikes_df["time"] <= rec.end_time)
-            spikes_df_during = spikes_df[mask_t]
-            duration = float(rec.end_time - rec.start_time)
-            if duration <= 0:
-                continue
-            counts = spikes_df_during["electrode"].value_counts().reset_index()
-            counts.columns = ["electrode", "counts"]
-            counts["firing_rate"] = counts["counts"] / duration
-            merged = pd.merge(counts, distances_df, on="electrode", how="inner")
-            merged = merged[merged["electrode"] != merged["ref_electrode"]]
-            all_rates.extend(merged["firing_rate"].astype(float).tolist())
-            all_dists.extend(merged["distance"].astype(float).tolist())
-
-        if len(all_dists) == 0:
-            centers = np.array([])
-            return FRDistanceResult(
-                distances=np.array([]), rates=np.array([]), bins=np.array([]),
-                binned=BinnedSeries(centers=centers, mean=centers, stderr=centers)
-            )
-
-        all_rates = np.asarray(all_rates, dtype=float)
-        all_dists = np.asarray(all_dists, dtype=float)
-
-        if log:
-            bins = np.logspace(np.log10(max(min_distance, all_dists.min())), np.log10(max_distance), num=74)
-        else:
-            bins = np.linspace(max(min_distance, all_dists.min()), max_distance, num=74)
-
-        bin_means, bin_edges, _ = binned_statistic(all_dists, all_rates, statistic=np.nanmean, bins=bins)
-        bin_std_err, _, _ = binned_statistic(
-            all_dists, all_rates, statistic=lambda x: np.std(x) / np.sqrt(len(x)), bins=bins
+        return compute_avg_rate_vs_distance(
+            self.ds.recordings,
+            refs,
+            log=log,
+            min_distance=min_distance,
+            max_distance=max_distance,
         )
-        centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-        valid = ~np.isnan(bin_means)
-        binned = BinnedSeries(centers=centers[valid], mean=bin_means[valid], stderr=bin_std_err[valid])
-        return FRDistanceResult(distances=all_dists, rates=all_rates, bins=bins, binned=binned)
 
     def plot_rate_with_synergy(
         self,
@@ -157,11 +107,14 @@ class FiringDistanceAnalyzer:
         ax1 = fig.add_subplot(gs[0])
         ax_model = fig.add_subplot(gs[1], sharex=ax1)
         ax_scatter = fig.add_subplot(gs[2])
-        ax1.plot(result.binned.centers, result.binned.mean, color='blue', label='Mean Firing Rate')
-        ax1.fill_between(result.binned.centers, result.binned.mean - result.binned.stderr, result.binned.mean + result.binned.stderr, alpha=0.4, color='blue')
-        ax1.set_xlabel('Distance from Electrode ($\\mu m$)')
-        ax1.set_ylabel('Mean Firing Rate (Hz)')
-        ax1.set_title(title)
+        plot_binned_distance_series(
+            result,
+            ax=ax1,
+            color='blue',
+            label='Mean Firing Rate',
+            ylabel='Mean Firing Rate (Hz)',
+            title=title,
+        )
 
         # Exponential fit: y ≈ A * exp(-k x) + C on binned means (TOP subplot)
         exp_popt = None
@@ -201,7 +154,7 @@ class FiringDistanceAnalyzer:
 
         ymin_top, ymax_top = ax1.get_ylim()
         try:
-            from ..helper_functions import truncate_colormap as _truncate
+            from ..plotting.style import truncate_colormap as _truncate
             base_cmap = _truncate(plt.get_cmap('viridis'), 0.4, 0.9)
         except Exception:
             base_cmap = plt.get_cmap('viridis')
@@ -468,65 +421,20 @@ class FiringDistanceAnalyzer:
         min_distance: float = 50,
         max_distance: float = 3500,
     ) -> CofiringDistanceResult:
-        """Average co-firing probability vs distance for a ±window around delay 0."""
+        """Compute average co-firing probability vs distance.
+
+        The pure computation lives in :mod:`ephax.metrics.firing_distance`; this
+        analyzer method only resolves the recording selection policy.
+        """
         refs = self._ensure_refs(refs_per_recording)
-        all_props: List[float] = []
-        all_dists: List[float] = []
-        # Convert symmetric ±window (in milliseconds) to seconds for cofiring_proportions API
-        pm_sec = float(plusminus_ms) / 1000.0
-        window_size_sec = 2.0 * pm_sec
-        delay_sec = -pm_sec
-
-        for rec, rlist in zip(self.ds.recordings, refs):
-            if rlist is None or len(rlist) == 0:
-                continue
-            spikes_df_full = pd.DataFrame(rec.spikes)
-            layout_df_full = pd.DataFrame(rec.layout)
-            # Restrict to window once
-            mask_t = (spikes_df_full["time"] >= rec.start_time) & (spikes_df_full["time"] <= rec.end_time)
-            spikes_df_window = spikes_df_full[mask_t].copy()
-
-            for ref in rlist:
-                # Assign distances relative to ref
-                spikes_df, layout_df = assign_r_distance(spikes_df_window.copy(), layout_df_full.copy(), int(ref))
-                firing_times = spikes_df["time"][spikes_df["electrode"] == int(ref)]
-                props = cofiring_proportions(
-                    spikes_df,
-                    firing_times,
-                    window_size=window_size_sec,
-                    delay=delay_sec,
-                    ref_electrode=int(ref),
-                )
-                for electrode, proportion in props.items():
-                    if electrode == int(ref):
-                        continue
-                    all_props.append(float(proportion))
-                    d = layout_df.loc[layout_df["electrode"] == electrode, "distance"].values[0]
-                    all_dists.append(float(d))
-
-        if not all_dists:
-            centers = np.array([])
-            return CofiringDistanceResult(
-                distances=np.array([]), proportions=np.array([]), bins=np.array([]),
-                binned=BinnedSeries(centers=centers, mean=centers, stderr=centers)
-            )
-
-        all_props = np.asarray(all_props, dtype=float)
-        all_dists = np.asarray(all_dists, dtype=float)
-
-        if log:
-            bins = np.logspace(np.log10(max(min_distance, all_dists.min())), np.log10(max_distance), num=74)
-        else:
-            bins = np.linspace(max(min_distance, all_dists.min()), max_distance, num=74)
-
-        bin_means, bin_edges, _ = binned_statistic(all_dists, all_props, statistic=np.nanmean, bins=bins)
-        bin_std_err, _, _ = binned_statistic(
-            all_dists, all_props, statistic=lambda x: np.std(x) / np.sqrt(len(x)), bins=bins
+        return compute_cofiring_avg_vs_distance(
+            self.ds.recordings,
+            refs,
+            plusminus_ms=plusminus_ms,
+            log=log,
+            min_distance=min_distance,
+            max_distance=max_distance,
         )
-        centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-        valid = ~np.isnan(bin_means)
-        binned = BinnedSeries(centers=centers[valid], mean=bin_means[valid], stderr=bin_std_err[valid])
-        return CofiringDistanceResult(distances=all_dists, proportions=all_props, bins=bins, binned=binned)
 
     # ----- Model comparison utilities -----
     @staticmethod
@@ -584,17 +492,14 @@ class FiringDistanceAnalyzer:
         ax1 = fig.add_subplot(gs[0])
         ax_model = fig.add_subplot(gs[1], sharex=ax1)
         ax_scatter = fig.add_subplot(gs[2])
-        ax1.plot(result.binned.centers, result.binned.mean, color='blue', label='Mean Co-Firing Rate')
-        ax1.fill_between(
-            result.binned.centers,
-            result.binned.mean - result.binned.stderr,
-            result.binned.mean + result.binned.stderr,
-            alpha=0.4,
-            color='blue'
+        plot_binned_distance_series(
+            result,
+            ax=ax1,
+            color='blue',
+            label='Mean Co-Firing Rate',
+            ylabel='Mean Co-Firing Expectation (spikes per ref-spike)',
+            title='Averaged Co-Firing Expectation vs. Distance',
         )
-        ax1.set_xlabel('Distance from Electrode ($\\mu m$)')
-        ax1.set_ylabel('Mean Co-Firing Expectation (spikes per ref-spike)')
-        ax1.set_title('Averaged Co-Firing Expectation vs. Distance')
 
         # Exponential fit: compute on binned means, draw in TOP subplot
         popt = None
@@ -621,7 +526,7 @@ class FiringDistanceAnalyzer:
         # Background shading on TOP subplot only
         ymin_top, ymax_top = ax1.get_ylim()
         try:
-            from ..helper_functions import truncate_colormap as _truncate
+            from ..plotting.style import truncate_colormap as _truncate
             base_cmap = _truncate(plt.get_cmap('viridis'), 0.4, 0.9)
         except Exception:
             base_cmap = plt.get_cmap('viridis')
@@ -639,7 +544,7 @@ class FiringDistanceAnalyzer:
 
         ymin_top, ymax_top = ax1.get_ylim()
         try:
-            from ..helper_functions import truncate_colormap as _truncate
+            from ..plotting.style import truncate_colormap as _truncate
             base_cmap = _truncate(plt.get_cmap('viridis'), 0.4, 0.9)
         except Exception:
             base_cmap = plt.get_cmap('viridis')
@@ -938,7 +843,7 @@ class FiringDistanceAnalyzer:
         r_um = np.linspace(edges[0], edges[-1], 1000)
 
         try:
-            from ..helper_functions import truncate_colormap as _truncate
+            from ..plotting.style import truncate_colormap as _truncate
             base_cmap = _truncate(plt.get_cmap('viridis'), 0.4, 0.9)
         except Exception:
             base_cmap = plt.get_cmap('viridis')

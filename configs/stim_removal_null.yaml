@@ -1,7 +1,10 @@
 run:
+  id: stim_removal_null_div12_well1
   seed: 0
   n_jobs: 1
-  output_dir: outputs/stim_removal_null
+  output_dir: outputs
+  figure_formats:
+    - png
 
 dataset:
   source: npz
@@ -9,9 +12,12 @@ dataset:
   min_amp: 0
   file_info:
     - path: well1/DIV12_240703_data_well1_exp_data.npz
+      recording_id: stimRemovalNull_well1_DIV12
+      culture_id: stimRemovalNull_well1
+      div: 12
       start_time: 0
       end_time: 600
-      well: 0
+      well: 1
 
 selection:
   mode: top
@@ -26,3 +32,67 @@ analyses:
     log_scale: true
     hist_bins: 100
     overlay_gmm: true
+    write_timeseries_checkpoints: false
+  burst:
+    enabled: false
+    detector: rate_peak
+    ifr_grid_hz: 50.0
+    smooth_sigma_sec: 0.15
+    burst_min_distance_sec: 1.0
+    burst_prominence_quantile: 0.90
+    burst_prominence_scale: 0.20
+    coarse_epoch_rel_height: 0.20
+    highres_bin_ms: 1.0
+    highres_smooth_sigma_ms: 3.0
+    gamma_search_ms: 120.0
+    gamma_search_to_epoch_end: true
+    gamma_min_distance_ms: 40.0
+    gamma_prominence_frac: 0.08
+    gamma_prominence_abs_floor: 0.10
+    gamma_keep_height_frac: 0.50
+    network_bin_ms: 10.0
+    network_active_rate_floor_hz: 1.0
+    network_threshold_baseline_quantile: 0.20
+    network_threshold_iqr_scale: 3.0
+    network_min_participation_fraction: 0.20
+    network_min_active_electrodes: 10
+    network_merge_gap_ms: 50.0
+    network_min_duration_ms: 30.0
+    network_min_spikes: 20
+    align_pre_ms: 20.0
+    align_post_ms: 40.0
+    sort_peak_pre_ms: 5.0
+    sort_peak_post_ms: 10.0
+  wave:
+    enabled: false
+    x_bin_um: 300.0
+    peak_search_start_ms: -15.0
+    peak_search_stop_ms: 20.0
+    trace_smooth_sigma_ms: 2.0
+    min_electrodes_per_bin: 5
+    min_events_per_bin: 5
+    bootstrap_reps: 2000
+    random_seed: 0
+  transfer_entropy:
+    enabled: false
+    scope: gamma
+    temporal_bin_ms: 1.0
+    signed_dx_bin_um: 200.0
+    delay_start_ms: 0.0
+    delay_stop_ms: 20.0
+    target_history_blocks_ms:
+      - [1.0, 2.0]
+      - [3.0, 5.0]
+      - [6.0, 10.0]
+    source_history_blocks_ms:
+      - [1.0, 5.0]
+    control_exclusion_ms: 3.0
+    controls_per_trigger: 1
+    n_surrogates: 100
+    min_observations: 800
+    min_effect_bits: 0.001
+    alpha: 0.05
+    delay_smooth_sigma_bins: 1.0
+    local_delay_tolerance_bins: 2
+    bootstrap_reps: 1000
+    random_seed: 0

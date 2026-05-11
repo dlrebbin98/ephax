@@ -12,6 +12,96 @@ class BinnedSeries:
 
 
 @dataclass
+class FRDistanceResult:
+    distances: np.ndarray
+    rates: np.ndarray
+    bins: np.ndarray
+    binned: BinnedSeries
+
+
+@dataclass
+class CofiringDistanceResult:
+    distances: np.ndarray
+    proportions: np.ndarray
+    bins: np.ndarray
+    binned: BinnedSeries
+
+
+@dataclass
+class PopulationIFR:
+    time_grid: np.ndarray
+    electrodes: np.ndarray
+    ifr_matrix: np.ndarray
+    mean_ifr: np.ndarray
+    mean_ifr_smooth: np.ndarray
+    per_electrode_mean_hz: np.ndarray
+
+
+@dataclass
+class HighResTraces:
+    bin_edges_s: np.ndarray
+    time_centers_s: np.ndarray
+    electrodes: np.ndarray
+    per_electrode_rate_hz: np.ndarray
+    population_rate_hz: np.ndarray
+    spikes_by_electrode: dict[int, np.ndarray]
+    spike_presence: np.ndarray
+
+
+@dataclass
+class NetworkActivityState:
+    bin_edges_s: np.ndarray
+    time_centers_s: np.ndarray
+    electrodes: np.ndarray
+    per_electrode_rate_hz: np.ndarray
+    active_mask: np.ndarray
+    spike_counts: np.ndarray
+    active_electrode_counts: np.ndarray
+    total_spike_counts: np.ndarray
+    participation_fraction: np.ndarray
+    population_activity_hz: np.ndarray
+    network_score: np.ndarray
+    electrode_thresholds_hz: np.ndarray
+
+
+@dataclass
+class AlignedBurstEvents:
+    relative_time_ms: np.ndarray
+    population_windows: np.ndarray
+    aligned_rate: np.ndarray
+    aligned_spikes: np.ndarray
+    valid_anchors: object
+    electrodes: np.ndarray
+
+
+@dataclass
+class WaveAnalysisResult:
+    event_direction: object
+    trace: object
+    peaks: object
+    bin_summary: object
+    fit_summary: object
+    heatmap: object
+    bootstrap_speeds: np.ndarray
+
+
+@dataclass
+class DiscreteTEResult:
+    delay_centers_ms: np.ndarray
+    signed_dx_centers_um: np.ndarray
+    conditional_probability: np.ndarray
+    raw_te_bits: np.ndarray
+    bias_corrected_te_bits: np.ndarray
+    te_pvalue: np.ndarray
+    effective_observations: np.ndarray
+    trigger_summary: object
+    observation_summary: object
+    ridge_summary: object
+    fit_summary: object
+    score: float
+
+
+@dataclass
 class IFRPeaks:
     values: np.ndarray           # possibly log10-transformed
     kde_x: np.ndarray
@@ -19,6 +109,18 @@ class IFRPeaks:
     peaks_x: np.ndarray          # x positions in same domain as values
     peaks_y: np.ndarray          # densities at peaks
     peaks_hz: np.ndarray         # peaks converted to Hz if values are log10
+
+
+@dataclass
+class IFRTimeSeriesPanel:
+    recording_index: int
+    start_time: float
+    end_time: float
+    electrodes: np.ndarray
+    time_points: np.ndarray
+    heatmap: np.ndarray
+    histogram_values: np.ndarray
+    log_scale: bool
 
 
 @dataclass

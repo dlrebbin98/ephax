@@ -8,12 +8,17 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Optional, Sequence
 
 import numpy as np
-import matplotlib.pyplot as plt
 
-from ..compute import ifr_peaks, fit_ifr_gmm
-from ..models import IFRPeaks, GMMFit, CofiringHeatmap
+from ..metrics.ifr import ifr_peaks, prepare_ifr_timeseries_panels
+from ..modeling.gmm import fit_ifr_gmm
+from ..models import IFRPeaks, GMMFit
+from ..plotting.cofiring import plot_cofiring_heatmap
+from ..plotting.ifr import (
+    plot_ifr_histogram,
+    plot_ifr_timeseries as _plot_ifr_timeseries,
+    plot_ifr_timeseries_panels,
+)
 from ..prep import RestingActivityDataset, PrepConfig
-from ..helper_functions import calculate_ifr
 
 
 @dataclass
@@ -99,49 +104,11 @@ class IFRAnalyzer:
         return fit_ifr_gmm(vals, log_scale=self.cfg.log_scale, n_components=self.cfg.n_components)
 
     # Viz
-    def plot_histogram(self, hist_bins: int = 100,show: bool = False, ax=None):
+    def plot_histogram(self, hist_bins: int = 100, show: bool = False, ax=None):
         """Plot pooled IFR histogram with optional KDE/peaks and GMM overlay."""
         peaks = self.peaks()
-        vals = peaks.values
-        x = peaks.kde_x
-        y = peaks.kde_y
-        fig, ax = (plt.gcf(), ax) if ax is not None else plt.subplots(figsize=(10, 6))
-        ax.hist(vals, bins=hist_bins, density=True, alpha=0.3, color="0.7", label="Data Histogram")
-        if self.cfg.show_kde:
-            ax.plot(x, y, color="k", lw=2, label="KDE")
-        if self.cfg.show_peaks and len(peaks.peaks_x) > 0:
-            ax.scatter(peaks.peaks_x, peaks.peaks_y, color="r", zorder=3, label="Peaks")
-
-        if self.cfg.overlay_gmm:
-            fit = self.fit_gmm(vals)
-            # Means for plotting in the same domain as vals
-            if self.cfg.log_scale:
-                means = np.log10(fit.means_hz)
-            else:
-                means = fit.means_hz
-            std = fit.std
-            weights = fit.weights
-            from scipy.stats import norm
-            sum_pdf = np.zeros_like(x)
-            colors = plt.cm.tab10(np.linspace(0, 1, max(1, len(means))))
-            for k, (mu, s, w) in enumerate(zip(means, std, weights)):
-                if not np.isfinite(s) or s <= 0:
-                    continue
-                comp_pdf = w * norm.pdf(x, loc=mu, scale=s)
-                sum_pdf += comp_pdf
-                label_hz = 10 ** mu if self.cfg.log_scale else mu
-                ax.plot(x, comp_pdf, lw=2, color=colors[k % len(colors)], label=f"{label_hz:.2f} Hz")
-                ymax = w * norm.pdf(mu, loc=mu, scale=s)
-                ax.annotate(f"{label_hz:.2f} Hz", (mu, ymax), xytext=(0, 6), textcoords="offset points", ha="center", fontsize=8)
-            ax.plot(x, sum_pdf, "r--", lw=2, label="Sum of Gaussians")
-
-        ax.set_xlabel("Log(IFR)" if self.cfg.log_scale else "IFR (Hz)")
-        ax.set_ylabel("Density")
-        ax.set_title("Gaussian Mixture Model Fit to IFR Data")
-        ax.legend()
-        if show:
-            plt.show()
-        return fig, ax
+        fit = self.fit_gmm(peaks.values) if self.cfg.overlay_gmm else None
+        return plot_ifr_histogram(peaks, self.cfg, fit=fit, hist_bins=hist_bins, show=show, ax=ax)
 
     # Time-series heatmap per recording (legacy plot_ifr integrated here)
     def plot_timeseries(
@@ -159,136 +126,39 @@ class IFRAnalyzer:
         Uses visualization parameters from IFRConfig.
         Returns a list of (fig, (ax_heatmap, ax_hist)) per recording plotted.
         """
-        # Resolve default selection if not provided
+        panels = self.timeseries_panels(selected_electrodes_per_recording)
+        return plot_ifr_timeseries_panels(
+            panels,
+            self.cfg,
+            title=title,
+            recording_titles=recording_titles,
+        )
+
+    def timeseries_panels(self, selected_electrodes_per_recording=None):
+        """Prepare plot-ready IFR time-series panels without creating figures."""
+        selections = self._resolve_selected_electrodes(selected_electrodes_per_recording)
+        return prepare_ifr_timeseries_panels(
+            self.spikes_list,
+            self.start_times,
+            self.end_times,
+            selections,
+            log_scale=self.cfg.log_scale,
+            time_grid_hz=self.cfg.time_grid_hz,
+            max_time_points=self.cfg.max_time_points,
+        )
+
+    def _resolve_selected_electrodes(self, selected_electrodes_per_recording=None):
         if selected_electrodes_per_recording is None:
             if self._refs_per_recording is not None:
                 selected_electrodes_per_recording = self._refs_per_recording
             elif self._ds is not None:
-                # Default to 'top' selection if dataset available
                 default_sel = PrepConfig(mode="top", top_start=10, top_stop=110, top_use_recording_window=True, verbose=False)
                 selected_electrodes_per_recording = self._ds.select_ref_electrodes(default_sel)
             else:
-                # Fallback: use all electrodes present per recording
                 selected_electrodes_per_recording = [
                     np.unique(np.asarray(sd.get("electrode", []), dtype=int)) for sd in self.spikes_list
                 ]
-        # Normalize selection input
-        if hasattr(selected_electrodes_per_recording, "__iter__") and len(self.spikes_list) == 1:
-            # If a flat list was passed for a single recording, wrap it
-            if not hasattr(selected_electrodes_per_recording[0], "__iter__") or isinstance(
-                selected_electrodes_per_recording, (list, tuple)
-            ) and selected_electrodes_per_recording and not hasattr(selected_electrodes_per_recording[0], "__len__"):
-                selected_electrodes_per_recording = [selected_electrodes_per_recording]
-
-        results = []
-        for i, (spikes_data, st, et) in enumerate(zip(self.spikes_list, self.start_times, self.end_times)):
-            sel = selected_electrodes_per_recording[i] if len(self.spikes_list) > 1 else selected_electrodes_per_recording[0]
-            rec_label = None
-            if recording_titles is not None:
-                if callable(recording_titles):
-                    rec_label = recording_titles(i)
-                elif i < len(recording_titles):
-                    rec_label = recording_titles[i]
-            # Calculate IFR per electrode
-            ifr_data, _, all_ifr_values = calculate_ifr(spikes_data, sel, st, et)
-            # Time grid: decouple from sf to avoid huge arrays; cap by max_time_points
-            duration = max(0.0, float(et) - float(st))
-            target_hz = float(self.cfg.time_grid_hz) if self.cfg.time_grid_hz and self.cfg.time_grid_hz > 0 else 100.0
-            n = int(max(1, min(duration * target_hz, float(self.cfg.max_time_points))))
-            time_points = np.linspace(float(st), float(et), n, dtype=np.float32)
-            valid_electrodes = []
-            # Preallocate heatmap with compact dtype
-            heatmap = np.empty((len(sel), n), dtype=np.float32)
-            row_idx = 0
-            for el in sel:
-                if el in ifr_data:
-                    times, vals = ifr_data[el]
-                    if self.cfg.log_scale:
-                        vals = np.where(vals == 0, 1e-3, vals)
-                        vals = np.log10(vals)
-                        vals = np.where(np.isinf(vals), -3, vals)
-                    heatmap[row_idx, :] = np.interp(time_points, times.astype(np.float32), vals).astype(np.float32)
-                    valid_electrodes.append(el)
-                    row_idx += 1
-            if row_idx == 0:
-                continue
-            H = heatmap[:row_idx, :]
-
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-            im = ax1.imshow(
-                H,
-                aspect="auto",
-                origin="lower",
-                extent=[float(st), float(et), -0.5, len(valid_electrodes) - 0.5],
-                cmap="viridis",
-                interpolation="nearest",
-            )
-            ax1.set_xlabel("Time (s)")
-            ax1.set_ylabel("Channel by Firing Frequency Rank")
-            if self.cfg.log_scale:
-                base_title = f"Log Instantaneous Firing Rate Across Top {len(valid_electrodes)} electrodes"
-                cbar_label = "Log Instantaneous Firing Rate (Hz)"
-            else:
-                base_title = f"Instantaneous Firing Rate Across Top {len(valid_electrodes)} electrodes"
-                cbar_label = "Instantaneous Firing Rate (Hz)"
-            if rec_label:
-                base_title = f"{rec_label}: {base_title}"
-            if title:
-                base_title = f"{title} | {base_title}"
-            ax1.set_title(base_title)
-            ax1.set_yticks([0, len(valid_electrodes) - 1])
-            ax1.set_yticklabels([1, len(valid_electrodes)])
-            cbar = fig.colorbar(im, ax=ax1)
-            cbar.set_label(cbar_label)
-
-            # Histogram
-            hist_vals = all_ifr_values.copy()
-            if self.cfg.log_scale:
-                hist_vals = hist_vals[hist_vals > 1e-3]
-                hist_vals = np.log10(hist_vals)
-            ax2.hist(hist_vals, bins=self.cfg.ts_bins, color="blue", edgecolor="black")
-            ticks = ax2.get_xticks()
-            ax2.set_xticks(ticks)
-            labels = [f'$10^{{{int(x)}}}$' if x.is_integer() else f'$10^{{{x:.1f}}}$' for x in ticks]
-            ax2.set_xticklabels(labels)
-            ax2.set_xlabel("Instantaneous Firing Rate (Hz)" if not self.cfg.log_scale else "Log Instantaneous Firing Rate (Hz)")
-            ax2.set_ylabel("Frequency")
-            ax2.set_title("Histogram of Instantaneous Firing Rates")
-            plt.tight_layout()
-            results.append((fig, (ax1, ax2)))
-        return results
-
-
-# Co-firing heatmap plot (moved from viz.py for consolidation)
-def plot_cofiring_heatmap(
-    heatmap: CofiringHeatmap,
-    normalize: bool = False,
-    cmap_name: str = "magma",
-    show: bool = False,
-    ax=None,
-):
-    """Plot co-firing heatmap Z(distance, delay) with optional t0 normalization."""
-    Z = heatmap.Z.copy()
-    delays = heatmap.delays
-    if normalize:
-        if np.any(np.isclose(delays, 0)):
-            t0_idx = int(np.argmin(np.abs(delays[:-1] - 0)))
-            base = Z[t0_idx, :]
-            with np.errstate(divide="ignore", invalid="ignore"):
-                Z = np.divide(Z, base, out=np.zeros_like(Z), where=base != 0)
-
-    fig, ax = (plt.gcf(), ax) if ax is not None else plt.subplots(figsize=(10, 6))
-    extent = [float(heatmap.distance_bins.min()), float(heatmap.distance_bins.max()), float(delays.min()), float(delays.max())]
-    cax = ax.imshow(Z, aspect="auto", cmap=plt.get_cmap(cmap_name), extent=extent, origin="lower")
-    ax.set_xlabel("Distance from Electrode ($\\mu m$)")
-    ax.set_ylabel("Delay (ms)")
-    ax.set_title(f"{'Normalized ' if normalize else ''} p(Co-Firing) vs Distance and Time")
-    ax.set_facecolor("black")
-    cbar = fig.colorbar(cax, ax=ax)
-    cbar.set_label("Probability")
-    if show:
-        plt.show()
-    return fig, ax
+        return _normalize_selected_electrodes(selected_electrodes_per_recording, len(self.spikes_list))
 
 
 # Convenience module-level function to plot IFR time series per recording
@@ -318,14 +188,38 @@ def plot_ifr_timeseries(
         start_times = [float(start_times)] * len(spikes_data_list)
     if np.isscalar(end_times):
         end_times = [float(end_times)] * len(spikes_data_list)
-    if selected_electrodes_per_recording and (
-        not isinstance(selected_electrodes_per_recording[0], (list, tuple, np.ndarray))
-    ):
-        selected_electrodes_per_recording = [selected_electrodes_per_recording]
+    selected_electrodes_per_recording = _normalize_selected_electrodes(
+        selected_electrodes_per_recording,
+        len(spikes_data_list),
+    )
 
     analyzer = IFRAnalyzer(spikes_data_list, start_times, end_times, config=config)
-    return analyzer.plot_timeseries(
+    return _plot_ifr_timeseries(
+        analyzer.spikes_list,
+        analyzer.start_times,
+        analyzer.end_times,
         selected_electrodes_per_recording,
+        analyzer.cfg,
         title=title,
         recording_titles=recording_titles,
     )
+
+
+def _normalize_selected_electrodes(selected_electrodes_per_recording, n_recordings: int):
+    selected = list(selected_electrodes_per_recording)
+    if n_recordings == 1:
+        if len(selected) == 0:
+            return [[]]
+        first = selected[0]
+        if isinstance(first, (list, tuple, np.ndarray)):
+            return [list(first)]
+        return [selected]
+
+    if len(selected) != n_recordings:
+        raise ValueError(
+            "selected_electrodes_per_recording must contain one electrode list per recording "
+            f"({n_recordings} expected, got {len(selected)})"
+        )
+    if selected and not isinstance(selected[0], (list, tuple, np.ndarray)):
+        raise ValueError("multiple recordings require nested electrode selections")
+    return [list(electrodes) for electrodes in selected]

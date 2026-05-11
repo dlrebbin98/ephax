@@ -1,391 +1,42 @@
-import os
-import h5py
-from pathlib import Path
-from typing import Optional, Union
-import numpy as np
-import pandas as pd
-import re
-import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
-from scipy.stats import chi2
+"""Compatibility wrappers for legacy helper imports.
 
-def load_spikes_raw(filename, well_no, recording_no=0):
-    # max_allowed_block_size = 40000
-    # assert(block_size<=max_allowed_block_size)
-    h5_file = h5py.File(filename, 'r')
+New code should import from focused modules:
+- ephax.data_io
+- ephax.preprocessing
+- ephax.metrics
+- ephax.modeling
+- ephax.plotting
+"""
 
-    # Get the stimulated electrode number
-    if 'electrodes' in h5_file['assay']['inputs']:
-        stimulus_electrode = h5_file['assay']['inputs']['electrodes'][0]
-        if isinstance(stimulus_electrode, np.bytes_):
-            stimulus_electrode = stimulus_electrode.decode('utf-8')
-        stimulus_electrode = int(re.search(r'"stim_must_include":"(\d+)"', stimulus_electrode).group(1))
-    else:
-        stimulus_electrode = 0
-        print("stimulus_electrode does not exist, assigning default value 0.")
+from __future__ import annotations
 
-    h5_object = h5_file['wells']['well{0:0>3}'.format(well_no)]['rec{0:0>4}'.format(recording_no)]
-    sf = h5_object['settings']['sampling'][0]
+from .data_io import (
+    load_raw,
+    load_spikes,
+    load_spikes_data,
+    load_spikes_npz,
+    load_spikes_raw,
+)
+from .metrics.ifr import calculate_ifr, prepare_ifr_timeseries_panel, prepare_ifr_timeseries_panels
+from .modeling.likelihood import likelihood_ratio_test, log_likelihood
+from .plotting.style import truncate_colormap
+from .preprocessing.geometry import assign_r_distance, assign_r_distance_all, assign_r_theta_distance
+from .preprocessing.selection import get_activity_sorted_electrodes
 
-    # Load spikes data
-    frameno = np.array(h5_object['spikes']['frameno'])
-    channel = np.array(h5_object['spikes']['channel'])
-    amplitude = np.array(h5_object['spikes']['amplitude'])
-    
-
-    # Correct for arbitrary frame numbers
-    first_frame = min(frameno)
-    time = (frameno - first_frame)/sf
-
-    # Extract relevant columns
-    spikes_data = {
-        'time': time[:],
-        'channel': channel[:],
-        'amplitude': amplitude[:]
-    }
-    
-        # Extract electrode mapping
-    mapping = h5_object['settings']['mapping']
-    channel_map = np.array(mapping['channel'])
-    electrode_map = np.array(mapping['electrode'])
-
-    layout = {
-        'channel': channel_map[:],
-        'electrode': electrode_map[:],
-        'x': np.array(mapping['x'])[:],
-        'y': np.array(mapping['y'])[:]
-    }
-
-    # Create a channel to electrode mapping
-    channel_to_electrode = {ch: el for ch, el in zip(channel_map, electrode_map)}
-
-    # Add electrode information to spikes_data
-    spikes_data['electrode'] = np.array([channel_to_electrode.get(ch, None) for ch in spikes_data['channel']])
-    valid_indices = np.where(spikes_data['electrode'] != None)[0]
-    spikes_data = {
-        key: np.array(value)[valid_indices] for key, value in spikes_data.items()
-    }
-    print(np.unique(spikes_data['electrode']), np.unique(['channel']))
-
-    # Load event data
-    events = h5_object['events']
-
-    frameno = np.array(events['frameno'])
-    eventtype = np.array(events['eventtype'])
-    eventid = np.array(events['eventid'])
-    eventmessage = np.array(events['eventmessage'])
-    time = (frameno - first_frame)/sf
-
-    event_data = {
-        'time': time[:],
-        'eventtype': eventtype[:],
-        'eventid': eventid[:],
-        'eventmessage': eventmessage[:]
-    }
-
-
-    return spikes_data, event_data, layout, sf, stimulus_electrode
-
-def load_raw(filename, well_no, recording_no, start_frame, block_size):
-    # The maximum allowed block size can be increased if needed,
-    # However, if the block size is too large, handling of the data in Python gets too slow.
-    max_allowed_block_size = 4000000
-    assert(block_size <= max_allowed_block_size)
-    h5_file = h5py.File(filename, 'r')
-    h5_object = h5_file['wells']['well{0:0>3}'.format(well_no)]['rec{0:0>4}'.format(recording_no)]
-
-    # Load settings from file
-    lsb = h5_object['settings']['lsb'][0]
-    sf = h5_object['settings']['sampling'][0]
-
-    # compute time vector
-    time = np.arange(start_frame, start_frame + block_size) / sf
-
-    # Load raw data from file
-    groups = h5_object['groups']
-    group0 = groups[next(iter(groups))]
-    first_frame = min(np.array(group0['frame_nos']))
-
-    # Get the total number of frames
-    total_frames = group0['raw'].shape[1]
-    print(f"Total frames available: {total_frames}")
-
-    # Adjust block size if it exceeds the total frames
-    if start_frame + block_size > total_frames:
-        block_size = total_frames - start_frame
-        print(f"Adjusted block size: {block_size}")
-
-    # events are stored in even wells 
-    event_object = h5_file['wells']['well{0:0>3}'.format(well_no - well_no % 2)]['rec{0:0>4}'.format(recording_no)]
-    
-    events = event_object['events']
-    frameno = np.array(events['frameno'])
-    frameno -= first_frame
-    eventtype = np.array(events['eventtype'])
-    eventid = np.array(events['eventid'])
-    eventmessage = np.array(events['eventmessage'])
-    eventtime = frameno / sf
-
-    # Filter events within the specific time range (600s to 601s)
-    time_range_start = int(start_frame/sf)
-    time_range_end = int((start_frame + block_size)/sf)
-    event_mask = (eventtime >= time_range_start) & (eventtime <= time_range_end)
-
-    event_data = {
-        'time': eventtime[event_mask],
-        'eventtype': eventtype[event_mask],
-        'eventid': eventid[event_mask],
-        'eventmessage': eventmessage[event_mask], 
-        'frameno': frameno[event_mask]
-    }
-
-    # Extract electrode mapping
-    mapping = h5_object['settings']['mapping']
-    channel = np.array(mapping['channel'])
-    electrode = np.array(mapping['electrode'])
-    x = np.array(mapping['x'])
-    y = np.array(mapping['y'])
-
-    layout = {
-        'channel': channel[:],
-        'electrode': electrode[:],
-        'x': x[:],
-        'y': y[:]
-    }
-
-    # Create a mask for valid channels based on the layout
-    valid_channels_mask = np.isin(np.arange(1024), layout['channel'])
-
-    # Select only the valid channels from the raw data
-    X = group0['raw'][valid_channels_mask, start_frame:start_frame + block_size].T * lsb
-
-    return X, time, sf, event_data, layout
-
-
-def load_spikes(filename, well_no, min_amp=10):
-    # Open the new HDF5 file
-    with h5py.File(filename, 'r') as f:
-        # Access the specified well
-        well_key = f'well{well_no:0>3}'
-        if well_key not in f['wells']:
-            raise ValueError(f'Well {well_no} not found in the file.')
-        
-        well_group = f['wells'][well_key]
-        
-        # Load spikes_data
-        spikes_data = {}
-        spikes_group = well_group['spikes']
-        for key in spikes_group.keys():
-            spikes_data[key] = spikes_group[key][:]
-        
-        # Filter spikes by minimum amplitude
-        amplitudes = np.abs(spikes_data['amplitude'])
-        mask = amplitudes >= min_amp
-        # Apply mask to each field in spikes_data
-        for field in list(spikes_data.keys()):
-            spikes_data[field] = spikes_data[field][mask]
-        
-        # Load event_data
-        event_data = {}
-        events_group = well_group['events']
-        for key in events_group.keys():
-            event_data[key] = events_group[key][:]
-        
-        # Load layout
-        layout = {}
-        layout_group = well_group['layout']
-        for key in layout_group.keys():
-            layout[key] = layout_group[key][:]
-        
-        # Load sf and stimulus_electrode
-        sf = well_group['sf'][()]
-        stimulus_electrode = f['stimulus_electrode'][()]
-        first_frame = well_group['first_frame'][()]
-        
-    return spikes_data, event_data, layout, sf, stimulus_electrode
-
-def load_spikes_data(file_info, min_amp=0, base_dir: Optional[Union[str, Path]] = None):
-    """Compatibility wrapper for :func:`ephax.data_io.load_spikes_data`."""
-    from ephax.data_io import load_spikes_data as _load_spikes_data
-
-    return _load_spikes_data(file_info, min_amp=min_amp, base_dir=base_dir)
-
-def load_spikes_npz(file_info, min_amp=0, base_dir: Optional[Union[str, Path]] = None):
-    """Compatibility wrapper for :func:`ephax.data_io.load_spikes_npz`."""
-    from ephax.data_io import load_spikes_npz as _load_spikes_npz
-
-    return _load_spikes_npz(file_info, min_amp=min_amp, base_dir=base_dir)
-
-def get_activity_sorted_electrodes(spikes_data_list, start=0, stop=None, start_time=0, end_time=np.inf):
-    # Initialize a dictionary to store spike counts across all recordings
-    spike_counts = {}
-
-    # Iterate through each spikes_data in the provided list
-    for spikes_data in spikes_data_list:
-        spikes_df = pd.DataFrame(spikes_data)
-
-        # Filter spikes within the specified time window
-        spikes_data_during = spikes_df[(spikes_df['time'] > start_time) & (spikes_df['time'] < end_time)]
-
-        # Count the number of spikes per electrode
-        for electrode in spikes_data_during['electrode']:
-            if electrode in spike_counts:
-                spike_counts[electrode] += 1
-            else:
-                spike_counts[electrode] = 1
-
-    # Sort electrodes by spike count
-    sorted_electrodes = sorted(spike_counts.items(), key=lambda item: item[1], reverse=True)
-
-    # Set stop to a valid number
-    if stop is None or stop > len(sorted_electrodes):
-        stop = len(sorted_electrodes)
-
-    # Return the top N electrodes based on start and stop indices
-    most_active_electrodes = [electrode for electrode, count in sorted_electrodes[start:stop]]
-    return most_active_electrodes
-
-def assign_r_distance(spikes_df, layout_df, ref_electrode):
-    if ref_electrode not in layout_df['electrode'].values:
-        raise ValueError(f"No data found for electrode: {ref_electrode}")
-    coords = layout_df.loc[layout_df['electrode'] == ref_electrode, ['x', 'y']].iloc[0]
-
-    layout_df['distance'] = np.sqrt((layout_df['x'] - coords['x'])**2 + (layout_df['y'] - coords['y'])**2)
-
-    channel_to_distance = layout_df.set_index('channel')['distance'].to_dict()
-    channel_to_electrode = layout_df.set_index('channel')['electrode'].to_dict()
-
-    spikes_df['distance'] = spikes_df['channel'].map(channel_to_distance)
-    spikes_df['electrode'] = spikes_df['channel'].map(channel_to_electrode)
-    spikes_df = spikes_df.dropna(subset=['distance', 'electrode'])
-
-    return spikes_df, layout_df
-
-def assign_r_distance_all(spikes_df, layout_df, ref_electrodes):
-    valid_ref_electrodes = [e for e in ref_electrodes if e in layout_df['electrode'].values]
-    if not valid_ref_electrodes:
-        raise ValueError("None of the ref_electrodes are found in layout_df")
-    
-    # Get coordinates of electrodes
-    electrode_coords = layout_df[['electrode', 'x', 'y']]
-    # Get coordinates of valid ref_electrodes
-    ref_coords = layout_df[layout_df['electrode'].isin(valid_ref_electrodes)][['electrode', 'x', 'y']]
-    ref_coords = ref_coords.rename(columns={'electrode': 'ref_electrode', 'x': 'ref_x', 'y': 'ref_y'})
-    
-    # Create all combinations of electrodes and ref_electrodes
-    electrode_coords['key'] = 1
-    ref_coords['key'] = 1
-    distances_df = pd.merge(electrode_coords, ref_coords, on='key').drop('key', axis=1)
-    distances_df = distances_df[distances_df['electrode'] != distances_df['ref_electrode']]
-    
-    # Compute distances
-    distances_df['distance'] = np.sqrt((distances_df['x'] - distances_df['ref_x'])**2 + (distances_df['y'] - distances_df['ref_y'])**2)
-    
-    # Map channels to electrodes
-    channel_to_electrode = layout_df.set_index('channel')['electrode'].to_dict()
-    spikes_df['electrode'] = spikes_df['channel'].map(channel_to_electrode)
-    
-    # Remove spikes with electrodes not in layout_df
-    spikes_df = spikes_df.dropna(subset=['electrode'])
-    
-    return spikes_df, distances_df
-
-def assign_r_theta_distance(spikes_df, layout_df, ref_electrode):
-    spikes_df, layout_df = assign_r_distance(spikes_df, layout_df, ref_electrode)
-    
-    coords = layout_df.loc[layout_df['electrode'] == ref_electrode, ['x', 'y']].iloc[0]
-
-    layout_df['theta'] = np.arctan2(layout_df['y'] - coords['y'], layout_df['x'] - coords['x'])
-    channel_to_theta = layout_df.set_index('channel')['theta'].to_dict()
-    spikes_df['theta'] = spikes_df['channel'].map(channel_to_theta)
-
-    return spikes_df, layout_df
-
-def log_likelihood(residuals, n_params):
-    # Calculate the log-likelihood assuming Gaussian residuals
-    sigma2 = np.var(residuals)
-    n = len(residuals)
-    log_likelihood = -0.5 * n * np.log(2 * np.pi * sigma2) - np.sum(residuals**2) / (2 * sigma2)
-    return log_likelihood
-
-def likelihood_ratio_test(logL_full, logL_reduced, df):
-    """Compute likelihood-ratio statistic (FULL vs REDUCED) and p-value.
-
-    Returns (LRT_stat, p_value). Silent by default; callers should print
-    model context (e.g., included gamma components) if needed.
-    """
-    from scipy.stats import chi2
-    if df is None or df <= 0:
-        return np.nan, np.nan
-    # Standard LRT form; equivalent to -2*(logL_reduced - logL_full)
-    LRT_stat = 2 * (logL_full - logL_reduced)
-    p_value = chi2.sf(LRT_stat, df)
-    return LRT_stat, p_value
-
-# Visualization helpers
-def truncate_colormap(cmap, minval: float = 0.0, maxval: float = 1.0, n: int = 100):
-    """Return a truncated copy of a colormap between [minval, maxval]."""
-    return LinearSegmentedColormap.from_list(
-        f"truncated({getattr(cmap, 'name', 'cmap')},{minval:.2f},{maxval:.2f})",
-        cmap(np.linspace(minval, maxval, n)),
-    )
-
-# IFR utilities
-def calculate_ifr(spikes_data, selected_electrodes, start_time=None, end_time=None):
-    """Compute instantaneous firing rate (IFR) per electrode as a step function.
-
-    Returns (ifr_data, total_firing, all_ifr_values):
-    - ifr_data: dict[electrode] -> (times, values)
-    - total_firing: dict[electrode] -> mean rate over [start_time, end_time]
-    - all_ifr_values: flattened IFR values across selected electrodes
-    """
-    import numpy as np
-
-    electrode_spikes = {int(el): [] for el in selected_electrodes}
-    for t, el in zip(spikes_data['time'], spikes_data['electrode']):
-        if int(el) in electrode_spikes:
-            electrode_spikes[int(el)].append(float(t))
-
-    for el in electrode_spikes:
-        electrode_spikes[el] = np.asarray(electrode_spikes[el], dtype=float)
-
-    if start_time is None:
-        start_time = float(np.min(spikes_data['time'])) if len(spikes_data['time']) else 0.0
-    if end_time is None:
-        end_time = float(np.max(spikes_data['time'])) if len(spikes_data['time']) else 0.0
-
-    def _calc(times):
-        if times.size < 2:
-            return np.array([start_time, end_time], dtype=float), np.array([0.0, 0.0], dtype=float)
-        ifr_times = [start_time]
-        ifr_values = [0.0]
-        first = times[0]
-        ifr_times.append(first)
-        ifr_values.append(0.0)
-        for i in range(times.size - 1):
-            a = times[i]
-            b = times[i + 1]
-            interval = max(1e-12, b - a)
-            val = 1.0 / interval
-            ifr_times.extend([a, b])
-            ifr_values.extend([val, val])
-        last = times[-1]
-        ifr_times.append(last)
-        ifr_values.append(0.0)
-        ifr_times.append(end_time)
-        ifr_values.append(0.0)
-        return np.asarray(ifr_times, dtype=float), np.asarray(ifr_values, dtype=float)
-
-    ifr_data = {}
-    total_firing = {}
-    all_ifr_values = []
-    for el, times in electrode_spikes.items():
-        sel = (times >= float(start_time)) & (times <= float(end_time))
-        times_sel = times[sel]
-        if times_sel.size > 0:
-            t_arr, v_arr = _calc(times_sel)
-            ifr_data[el] = (t_arr, v_arr)
-            duration = max(1e-12, float(end_time) - float(start_time))
-            total_firing[el] = float(times_sel.size) / duration
-            all_ifr_values.extend(v_arr.tolist())
-    return ifr_data, total_firing, np.asarray(all_ifr_values, dtype=float)
+__all__ = [
+    "assign_r_distance",
+    "assign_r_distance_all",
+    "assign_r_theta_distance",
+    "calculate_ifr",
+    "get_activity_sorted_electrodes",
+    "likelihood_ratio_test",
+    "load_raw",
+    "load_spikes",
+    "load_spikes_data",
+    "load_spikes_npz",
+    "load_spikes_raw",
+    "log_likelihood",
+    "prepare_ifr_timeseries_panel",
+    "prepare_ifr_timeseries_panels",
+    "truncate_colormap",
+]

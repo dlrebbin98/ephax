@@ -12,7 +12,7 @@ import scipy
 from scipy.stats import gaussian_kde, binned_statistic
 
 from ..prep import RestingActivityDataset
-from ..helper_functions import calculate_ifr
+from ..metrics.ifr import calculate_ifr
 
 
 @dataclass

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
@@ -82,6 +83,110 @@ def load_spikes(filename: str | Path, well_no: int, min_amp: float = 10):
         stimulus_electrode = f["stimulus_electrode"][()]
 
     return validate_spikes_data(spikes_data), event_data, validate_layout(layout), sf, stimulus_electrode
+
+
+def load_spikes_raw(filename: str | Path, well_no: int, recording_no: int = 0):
+    """Load spike and event data from a raw MaxWell-style H5 recording."""
+    with h5py.File(filename, "r") as h5_file:
+        if "electrodes" in h5_file["assay"]["inputs"]:
+            stimulus_electrode = h5_file["assay"]["inputs"]["electrodes"][0]
+            if isinstance(stimulus_electrode, np.bytes_):
+                stimulus_electrode = stimulus_electrode.decode("utf-8")
+            match = re.search(r'"stim_must_include":"(\d+)"', stimulus_electrode)
+            stimulus_electrode = int(match.group(1)) if match else 0
+        else:
+            stimulus_electrode = 0
+
+        h5_object = h5_file["wells"][f"well{well_no:0>3}"][f"rec{recording_no:0>4}"]
+        sf = h5_object["settings"]["sampling"][0]
+
+        frameno = np.array(h5_object["spikes"]["frameno"])
+        channel = np.array(h5_object["spikes"]["channel"])
+        amplitude = np.array(h5_object["spikes"]["amplitude"])
+        first_frame = min(frameno)
+        time = (frameno - first_frame) / sf
+
+        spikes_data = {
+            "time": time[:],
+            "channel": channel[:],
+            "amplitude": amplitude[:],
+        }
+
+        mapping = h5_object["settings"]["mapping"]
+        channel_map = np.array(mapping["channel"])
+        electrode_map = np.array(mapping["electrode"])
+        layout = {
+            "channel": channel_map[:],
+            "electrode": electrode_map[:],
+            "x": np.array(mapping["x"])[:],
+            "y": np.array(mapping["y"])[:],
+        }
+
+        channel_to_electrode = {ch: el for ch, el in zip(channel_map, electrode_map)}
+        spikes_data["electrode"] = np.array([channel_to_electrode.get(ch, None) for ch in spikes_data["channel"]])
+        valid_indices = np.where(spikes_data["electrode"] != None)[0]
+        spikes_data = {key: np.array(value)[valid_indices] for key, value in spikes_data.items()}
+
+        events = h5_object["events"]
+        event_frameno = np.array(events["frameno"])
+        event_data = {
+            "time": ((event_frameno - first_frame) / sf)[:],
+            "eventtype": np.array(events["eventtype"])[:],
+            "eventid": np.array(events["eventid"])[:],
+            "eventmessage": np.array(events["eventmessage"])[:],
+        }
+
+    return validate_spikes_data(spikes_data), event_data, validate_layout(layout), sf, stimulus_electrode
+
+
+def load_raw(filename: str | Path, well_no: int, recording_no: int, start_frame: int, block_size: int):
+    """Load a raw voltage block and events from a MaxWell-style H5 recording."""
+    max_allowed_block_size = 4000000
+    assert block_size <= max_allowed_block_size
+
+    with h5py.File(filename, "r") as h5_file:
+        h5_object = h5_file["wells"][f"well{well_no:0>3}"][f"rec{recording_no:0>4}"]
+        lsb = h5_object["settings"]["lsb"][0]
+        sf = h5_object["settings"]["sampling"][0]
+        time = np.arange(start_frame, start_frame + block_size) / sf
+
+        groups = h5_object["groups"]
+        group0 = groups[next(iter(groups))]
+        first_frame = min(np.array(group0["frame_nos"]))
+        total_frames = group0["raw"].shape[1]
+
+        if start_frame + block_size > total_frames:
+            block_size = total_frames - start_frame
+
+        event_object = h5_file["wells"][f"well{well_no - well_no % 2:0>3}"][f"rec{recording_no:0>4}"]
+        events = event_object["events"]
+        frameno = np.array(events["frameno"])
+        frameno -= first_frame
+        eventtime = frameno / sf
+        time_range_start = int(start_frame / sf)
+        time_range_end = int((start_frame + block_size) / sf)
+        event_mask = (eventtime >= time_range_start) & (eventtime <= time_range_end)
+
+        event_data = {
+            "time": eventtime[event_mask],
+            "eventtype": np.array(events["eventtype"])[event_mask],
+            "eventid": np.array(events["eventid"])[event_mask],
+            "eventmessage": np.array(events["eventmessage"])[event_mask],
+            "frameno": frameno[event_mask],
+        }
+
+        mapping = h5_object["settings"]["mapping"]
+        layout = {
+            "channel": np.array(mapping["channel"])[:],
+            "electrode": np.array(mapping["electrode"])[:],
+            "x": np.array(mapping["x"])[:],
+            "y": np.array(mapping["y"])[:],
+        }
+
+        valid_channels_mask = np.isin(np.arange(1024), layout["channel"])
+        X = group0["raw"][valid_channels_mask, start_frame:start_frame + block_size].T * lsb
+
+    return X, time, sf, event_data, validate_layout(layout)
 
 
 def load_spikes_data(file_info: Iterable[tuple], min_amp: float = 0, base_dir: Optional[Union[str, Path]] = None):

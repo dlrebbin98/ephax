@@ -12,9 +12,9 @@ from io import BytesIO
 
 from ..prep import RestingActivityDataset, PrepConfig
 from ..analyzers.ifr import plot_cofiring_heatmap as _plot_heatmap
-from ..compute import aggregate_cofiring_heatmap as _aggregate_heatmap
-from ..helper_functions import assign_r_theta_distance, assign_r_distance
-from ..compute import cofiring_proportions as _cofiring_proportions
+from ..metrics.cofiring import aggregate_cofiring_heatmap as _aggregate_heatmap
+from ..metrics.cofiring import cofiring_proportions as _cofiring_proportions
+from ..preprocessing.geometry import assign_r_theta_distance, assign_r_distance
 from matplotlib.cm import get_cmap
 from scipy.stats import binned_statistic_2d
 

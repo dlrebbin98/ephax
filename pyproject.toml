@@ -33,9 +33,10 @@ notebook = [
 
 [project.scripts]
 ephax = "ephax.workflows:main"
+ephax-build-atomic-figures = "ephax.cli.build_atomic_figures:main"
 
-[tool.setuptools]
-packages = ["ephax", "ephax.analyzers"]
+[tool.setuptools.packages.find]
+include = ["ephax*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
