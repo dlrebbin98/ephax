@@ -234,7 +234,7 @@ def plot_high_activity_burst_windows(
     n_windows: int = 3,
     pad_s: float = 1.5,
 ):
-    """Plot high-activity periods, nested bursts, and max-participation anchors."""
+    """Plot high-activity periods, nested bursts, and burst anchors."""
     time_grid = np.asarray(time_grid, dtype=float)
     mean_ifr = np.asarray(mean_ifr, dtype=float)
     mean_ifr_smooth = np.asarray(mean_ifr_smooth, dtype=float)
@@ -267,7 +267,7 @@ def plot_high_activity_burst_windows(
 
         _shade_epochs(ax, high_activity_epochs, start_s, stop_s, color="tab:green", alpha=0.13, label="High activity" if panel_idx == 0 else None)
         _shade_epochs(ax, burst_epochs, start_s, stop_s, color="tab:blue", alpha=0.20, label="Participation burst" if panel_idx == 0 else None)
-        _scatter_burst_anchors(ax, burst_epochs, start_s, stop_s, time_grid, mean_ifr, floor, label="Max-participation burst anchor" if panel_idx == 0 else None)
+        _scatter_burst_anchors(ax, burst_epochs, start_s, stop_s, time_grid, mean_ifr, floor, label="Burst activity anchor" if panel_idx == 0 else None)
 
         ax2 = ax.twinx()
         state_mask = (network_activity.time_centers_s >= start_s) & (network_activity.time_centers_s <= stop_s)

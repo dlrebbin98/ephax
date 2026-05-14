@@ -205,8 +205,9 @@ def fit_wave_speed(
     if boot_speeds.size:
         ci_low, ci_high = np.percentile(boot_speeds, [2.5, 97.5])
         boot_median = float(np.median(boot_speeds))
+        boot_mean = float(np.mean(boot_speeds))
     else:
-        ci_low = ci_high = boot_median = np.nan
+        ci_low = ci_high = boot_median = boot_mean = np.nan
 
     counts = event_direction["event_direction"].value_counts().reindex(["left_to_right", "right_to_left"], fill_value=0)
     fit_summary = pd.DataFrame(
@@ -221,6 +222,7 @@ def fit_wave_speed(
                 "slope_ms_per_um": float(slope),
                 "intercept_ms": float(intercept),
                 "implied_speed_um_per_ms": float(speed),
+                "bootstrap_speed_mean_um_per_ms": float(boot_mean),
                 "bootstrap_speed_median_um_per_ms": float(boot_median),
                 "bootstrap_speed_ci_low_um_per_ms": float(ci_low),
                 "bootstrap_speed_ci_high_um_per_ms": float(ci_high),

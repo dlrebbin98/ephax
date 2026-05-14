@@ -137,11 +137,13 @@ def plot_ifr_timeseries_panel(
     cbar = fig.colorbar(im, ax=ax_heatmap)
     cbar.set_label(_ifr_colorbar_label(panel.log_scale))
 
-    ax_hist.hist(panel.histogram_values, bins=config.ts_bins, color="blue", edgecolor="black")
+    histogram_values = panel.histogram_values
     if panel.log_scale:
-        ticks = ax_hist.get_xticks()
-        ax_hist.set_xticks(ticks)
-        ax_hist.set_xticklabels([_log_tick_label(x) for x in ticks])
+        histogram_values = np.power(10.0, histogram_values)
+        histogram_values = histogram_values[np.isfinite(histogram_values) & (histogram_values > 0)]
+    ax_hist.hist(histogram_values, bins=config.ts_bins, color="blue", edgecolor="black")
+    if panel.log_scale:
+        ax_hist.set_xscale("log")
     ax_hist.set_xlabel(_ifr_axis_label(panel.log_scale))
     ax_hist.set_ylabel("Frequency")
     ax_hist.set_title("Histogram of Instantaneous Firing Rates")
@@ -169,15 +171,11 @@ def _timeseries_title(panel: IFRTimeSeriesPanel, title: Optional[str] = None, re
 
 
 def _ifr_axis_label(log_scale: bool) -> str:
-    return "Log Instantaneous Firing Rate (Hz)" if log_scale else "Instantaneous Firing Rate (Hz)"
+    return "Instantaneous Firing Rate (Hz)"
 
 
 def _ifr_colorbar_label(log_scale: bool) -> str:
-    return _ifr_axis_label(log_scale)
-
-
-def _log_tick_label(value: float) -> str:
-    return f"$10^{{{int(value)}}}$" if float(value).is_integer() else f"$10^{{{value:.1f}}}$"
+    return "log10 instantaneous firing rate (Hz)" if log_scale else _ifr_axis_label(log_scale)
 
 
 def _normalize_selected_electrodes(selected_electrodes_per_recording, n_recordings: int):
