@@ -68,6 +68,60 @@ def plot_population_ifr_summary(
     return fig, (ax_heatmap, ax_mean)
 
 
+def plot_activity_state_ifr_kde_histograms(
+    activity_kde_results: dict[str, dict[str, np.ndarray]],
+    activity_values: dict[str, np.ndarray],
+    *,
+    states=("high_activity", "burst"),
+    state_labels: dict[str, str] | None = None,
+    state_colors: dict[str, str] | None = None,
+    source_label: str | None = None,
+    max_peak_labels: int = 6,
+):
+    """Plot activity-state IFR histograms with KDE-smoothed maxima."""
+    state_labels = state_labels or {
+        "high_activity": "High activity, non-burst",
+        "burst": "Burst",
+    }
+    state_colors = state_colors or {
+        "high_activity": "tab:green",
+        "burst": "tab:blue",
+    }
+    states = list(states)
+    fig, axes = plt.subplots(1, len(states), figsize=(7.5 * len(states), 4.8), squeeze=False, constrained_layout=True)
+    axes = axes.reshape(-1)
+
+    for ax, state in zip(axes, states):
+        hist = activity_kde_results[state]
+        values = np.asarray(activity_values[state], dtype=float)
+        widths = np.diff(hist["plot_edges_hz"])
+        ax.bar(
+            hist["plot_centers_hz"],
+            hist["counts"],
+            width=widths,
+            color=state_colors.get(state, "0.5"),
+            alpha=0.42,
+            edgecolor="white",
+            linewidth=0.25,
+            align="center",
+            label=state_labels.get(state, state),
+        )
+        ax.plot(hist["grid_hz"], hist["smoothed_counts"], color=state_colors.get(state, "0.5"), lw=2.0)
+        ax.scatter(hist["peak_hz"], hist["peak_counts"], color="crimson", s=28, zorder=3, label="Binned-KDE maxima")
+        for peak_hz, peak_counts in zip(hist["peak_hz"][: int(max_peak_labels)], hist["peak_counts"][: int(max_peak_labels)]):
+            ax.text(float(peak_hz), float(peak_counts), f"{peak_hz:.2f}", fontsize=8, ha="left", va="bottom")
+        ax.set_xscale("log")
+        ax.set_xlabel("Instantaneous firing rate (Hz)")
+        ax.set_ylabel("Count")
+        ax.set_title(f"{state_labels.get(state, state)} IFR histogram (n={values.size:,})")
+        ax.grid(True, which="both", axis="x", alpha=0.18)
+        ax.legend(loc="upper right")
+
+    if source_label:
+        fig.suptitle(f"Binned-KDE maxima from {source_label}")
+    return fig, axes
+
+
 def plot_gamma_population_windows(aligned: AlignedBurstEvents, *, title: str | None = None):
     """Plot individual and mean population windows aligned to gamma anchors."""
     fig, ax = plt.subplots(figsize=(11, 5), constrained_layout=True)

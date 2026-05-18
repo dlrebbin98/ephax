@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks, peak_prominences
+from scipy.stats import gaussian_kde
 
 from ..models import AlignedBurstEvents, HighResTraces, NetworkActivityState, PopulationIFR
 from .ifr import calculate_ifr
@@ -62,6 +63,199 @@ def build_population_ifr(
         mean_ifr_smooth=mean_ifr_smooth,
         per_electrode_mean_hz=np.asarray(avg_rates, dtype=float),
     )
+
+
+def interval_membership(times_s, intervals_df: pd.DataFrame) -> np.ndarray:
+    """Return a mask indicating whether each time falls inside any interval."""
+    times_s = np.asarray(times_s, dtype=float)
+    mask = np.zeros(times_s.shape, dtype=bool)
+    if intervals_df is None or len(intervals_df) == 0:
+        return mask
+    if not {"start_time_s", "end_time_s"}.issubset(intervals_df.columns):
+        raise ValueError("intervals_df must contain start_time_s and end_time_s columns.")
+    for row in intervals_df[["start_time_s", "end_time_s"]].itertuples(index=False):
+        mask |= (times_s >= float(row.start_time_s)) & (times_s <= float(row.end_time_s))
+    return mask
+
+
+def extract_activity_state_ifr(
+    recording,
+    selected_refs,
+    high_epochs_df: pd.DataFrame,
+    burst_epochs_df: pd.DataFrame,
+    *,
+    max_hz: float | None = None,
+) -> dict[str, np.ndarray]:
+    """Extract raw ISI-derived IFR samples split by activity state.
+
+    ``high_activity`` excludes samples that also fall inside a burst interval.
+    """
+    out = {"low_activity": [], "high_activity": [], "burst": []}
+    spike_times = np.asarray(recording.spikes["time"], dtype=float)
+    spike_electrodes = np.asarray(recording.spikes["electrode"], dtype=int)
+    for electrode in np.asarray(selected_refs, dtype=int):
+        electrode_times = np.sort(
+            spike_times[
+                (spike_electrodes == int(electrode))
+                & (spike_times >= float(recording.start_time))
+                & (spike_times <= float(recording.end_time))
+            ]
+        )
+        if electrode_times.size < 2:
+            continue
+        isi_s = np.diff(electrode_times)
+        valid = isi_s > 0
+        if not np.any(valid):
+            continue
+        midpoints = 0.5 * (electrode_times[:-1][valid] + electrode_times[1:][valid])
+        ifr_values = 1.0 / isi_s[valid]
+        finite = np.isfinite(ifr_values) & (ifr_values > 0)
+        if max_hz is not None:
+            finite &= ifr_values <= float(max_hz)
+        if not np.any(finite):
+            continue
+        midpoints = midpoints[finite]
+        ifr_values = ifr_values[finite]
+        in_burst = interval_membership(midpoints, burst_epochs_df)
+        in_high = interval_membership(midpoints, high_epochs_df)
+        out["burst"].append(ifr_values[in_burst])
+        out["high_activity"].append(ifr_values[in_high & ~in_burst])
+        out["low_activity"].append(ifr_values[~in_high])
+
+    result = {}
+    for state, chunks in out.items():
+        nonempty_chunks = [chunk for chunk in chunks if chunk.size > 0]
+        result[state] = np.concatenate(nonempty_chunks).astype(float) if nonempty_chunks else np.array([], dtype=float)
+    return result
+
+
+def _empty_binned_kde_summary(
+    plot_edges_hz: np.ndarray | None = None,
+    plot_centers_hz: np.ndarray | None = None,
+    grid_hz: np.ndarray | None = None,
+    smoothed_counts: np.ndarray | None = None,
+):
+    return {
+        "plot_edges_hz": np.array([], dtype=float) if plot_edges_hz is None else np.asarray(plot_edges_hz, dtype=float),
+        "plot_centers_hz": np.array([], dtype=float) if plot_centers_hz is None else np.asarray(plot_centers_hz, dtype=float),
+        "counts": np.array([], dtype=float)
+        if plot_centers_hz is None
+        else np.zeros_like(np.asarray(plot_centers_hz, dtype=float)),
+        "grid_hz": np.array([], dtype=float) if grid_hz is None else np.asarray(grid_hz, dtype=float),
+        "smoothed_counts": np.array([], dtype=float)
+        if smoothed_counts is None
+        else np.asarray(smoothed_counts, dtype=float),
+        "peak_hz": np.array([], dtype=float),
+        "peak_counts": np.array([], dtype=float),
+    }
+
+
+def binned_kde_peak_summary(
+    values_hz,
+    *,
+    log_bins: bool = True,
+    n_bins: int = 260,
+    grid_size: int = 8192,
+    prominence_fraction: float = 0.012,
+    distance_fraction: float = 0.006,
+    bandwidth_scale: float = 0.22,
+    max_hz: float | None = None,
+) -> dict[str, np.ndarray]:
+    """Summarize an IFR histogram with a KDE-smoothed count curve and peaks."""
+    values_hz = np.asarray(values_hz, dtype=float)
+    values_hz = values_hz[np.isfinite(values_hz) & (values_hz > 0)]
+    if max_hz is not None:
+        values_hz = values_hz[values_hz <= float(max_hz)]
+    if values_hz.size < 2:
+        return _empty_binned_kde_summary()
+
+    if log_bins:
+        domain_values = np.log10(values_hz)
+        domain_edges = np.linspace(float(domain_values.min()), float(domain_values.max()), int(n_bins) + 1)
+        domain_centers = 0.5 * (domain_edges[:-1] + domain_edges[1:])
+        plot_edges_hz = np.power(10.0, domain_edges)
+        plot_centers_hz = np.power(10.0, domain_centers)
+        domain_grid = np.linspace(domain_edges[0], domain_edges[-1], int(grid_size))
+        grid_hz = np.power(10.0, domain_grid)
+    else:
+        domain_values = values_hz
+        domain_edges = np.linspace(float(values_hz.min()), float(values_hz.max()), int(n_bins) + 1)
+        domain_centers = 0.5 * (domain_edges[:-1] + domain_edges[1:])
+        plot_edges_hz = domain_edges
+        plot_centers_hz = domain_centers
+        domain_grid = np.linspace(domain_edges[0], domain_edges[-1], int(grid_size))
+        grid_hz = domain_grid
+
+    counts, _ = np.histogram(domain_values, bins=domain_edges)
+    counts = counts.astype(float)
+    valid = counts > 0
+    if not np.any(valid):
+        summary = _empty_binned_kde_summary(plot_edges_hz, plot_centers_hz, grid_hz, np.zeros_like(domain_grid))
+        summary["counts"] = counts
+        return summary
+    if np.count_nonzero(valid) < 2:
+        smoothed_counts = np.zeros_like(domain_grid, dtype=float)
+        occupied_center = domain_centers[valid][0]
+        peak_idx = int(np.argmin(np.abs(domain_grid - occupied_center)))
+        smoothed_counts[peak_idx] = float(counts[valid][0])
+        return {
+            "plot_edges_hz": plot_edges_hz,
+            "plot_centers_hz": plot_centers_hz,
+            "counts": counts,
+            "grid_hz": grid_hz,
+            "smoothed_counts": smoothed_counts,
+            "peak_hz": np.array([grid_hz[peak_idx]], dtype=float),
+            "peak_counts": np.array([smoothed_counts[peak_idx]], dtype=float),
+        }
+
+    def scaled_scott(kde_obj):
+        return kde_obj.scotts_factor() * float(bandwidth_scale)
+
+    kde = gaussian_kde(domain_centers[valid], weights=counts[valid], bw_method=scaled_scott)
+    density = kde(domain_grid)
+    bin_width = float(np.mean(np.diff(domain_edges)))
+    smoothed_counts = density * float(counts.sum()) * bin_width
+
+    peak_idx, _ = find_peaks(
+        smoothed_counts,
+        prominence=float(np.nanmax(smoothed_counts)) * float(prominence_fraction),
+        distance=max(1, int(len(domain_grid) * float(distance_fraction))),
+    )
+    if peak_idx.size == 0:
+        peak_idx = np.array([int(np.argmax(smoothed_counts))], dtype=int)
+    order = np.argsort(smoothed_counts[peak_idx])[::-1]
+    peak_idx = peak_idx[order]
+
+    return {
+        "plot_edges_hz": plot_edges_hz,
+        "plot_centers_hz": plot_centers_hz,
+        "counts": counts,
+        "grid_hz": grid_hz,
+        "smoothed_counts": smoothed_counts,
+        "peak_hz": grid_hz[peak_idx],
+        "peak_counts": smoothed_counts[peak_idx],
+    }
+
+
+def activity_state_kde_peak_frequencies(
+    activity_kde_results: dict[str, dict[str, np.ndarray]],
+    states=("high_activity", "burst"),
+    *,
+    min_peak_hz: float = 30.0,
+) -> np.ndarray:
+    """Return sorted unique KDE peak frequencies for the requested states."""
+    peaks = []
+    for state in states:
+        if state not in activity_kde_results:
+            continue
+        state_peaks = np.asarray(activity_kde_results[state].get("peak_hz", []), dtype=float)
+        peaks.append(state_peaks[np.isfinite(state_peaks) & (state_peaks > float(min_peak_hz))])
+    if not peaks:
+        return np.array([], dtype=float)
+    merged = np.concatenate(peaks)
+    if merged.size == 0:
+        return np.array([], dtype=float)
+    return np.unique(np.sort(merged))
 
 
 def detect_coarse_burst_epochs(

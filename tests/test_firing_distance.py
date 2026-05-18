@@ -56,6 +56,41 @@ def test_firing_distance_analyzer_delegates_compute_to_metrics():
     assert cofiring.distances.size == 2
 
 
+def test_firing_distance_analyzer_uses_fixed_frequency_values():
+    ds = fixture_dataset()
+    analyzer = FiringDistanceAnalyzer(
+        ds,
+        refs_per_recording=[np.array([101])],
+        frequency_values_hz=np.array([12.0, 40.0, 120.0]),
+    )
+
+    ok, gamma_hz, weights = analyzer._compute_ifr_peaks_weights(peak_min_hz=30.0, peak_max_hz=100.0)
+
+    assert ok
+    assert gamma_hz.tolist() == [40.0]
+    assert weights.tolist() == [1.0]
+
+
+def test_fixed_frequency_values_skip_ifr_gmm(monkeypatch):
+    ds = fixture_dataset()
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("GMM fitting should not run when fixed frequencies are supplied")
+
+    monkeypatch.setattr("ephax.analyzers.ifr.IFRAnalyzer.fit_gmm", fail_if_called)
+    analyzer = FiringDistanceAnalyzer(
+        ds,
+        refs_per_recording=[np.array([101])],
+        frequency_values_hz=np.array([40.0]),
+    )
+
+    curve = analyzer.correlation_curve(peak_min_hz=30.0, peak_max_hz=100.0)
+
+    assert curve is not None
+    r_um, values = curve
+    assert r_um.size == values.size
+
+
 def test_firing_distance_plotting_helper_consumes_result_object():
     ds = fixture_dataset()
     result = avg_rate_vs_distance(ds.recordings, [np.array([101])], min_distance=0, max_distance=10)

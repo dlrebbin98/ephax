@@ -31,6 +31,14 @@ class FiringDistanceAnalyzer:
     Provides averaged rate vs distance, co-firing vs distance, weighted pairwise
     distance histograms, synergy overlays using correlation_function, and model
     comparison utilities for reduced models.
+
+    Parameters
+    ----------
+    frequency_values_hz:
+        Optional positive frequency values used for all synergy/model curves.
+        When supplied, downstream plotting and model-comparison methods use
+        these values directly and do not estimate IFR peaks with a mixture
+        model. If omitted, the legacy IFR peak/GMM estimation path is used.
     """
 
     def __init__(
@@ -45,6 +53,7 @@ class FiringDistanceAnalyzer:
         v_ax: float = 0.45,
         std: float = 0.15,
         lambda_eph: float = 100000.0,
+        frequency_values_hz: Optional[np.ndarray] = None,
     ) -> None:
         self.ds = dataset
         self.ds_perm = dataset_perm
@@ -57,6 +66,7 @@ class FiringDistanceAnalyzer:
         self.v_ax = float(v_ax)
         self.std = float(std)
         self.lambda_eph = float(lambda_eph)
+        self.frequency_values_hz = self._validate_frequency_values(frequency_values_hz)
         # If no refs provided, compute defaults immediately for determinism
         if self._stored_refs is None:
             self._stored_refs = self._compute_default_refs(dataset=self.ds)
@@ -296,7 +306,27 @@ class FiringDistanceAnalyzer:
         return fig, ax1
 
     # ----- Shared helpers -----
+    @staticmethod
+    def _validate_frequency_values(frequency_values_hz: Optional[np.ndarray]) -> np.ndarray | None:
+        if frequency_values_hz is None:
+            return None
+        values = np.asarray(frequency_values_hz, dtype=float).reshape(-1)
+        values = values[np.isfinite(values)]
+        values = values[values > 0]
+        if values.size == 0:
+            raise ValueError("frequency_values_hz must contain at least one positive finite frequency.")
+        return np.sort(values)
+
     def _compute_ifr_peaks_weights(self, peak_min_hz: float, peak_max_hz: float):
+        if self.frequency_values_hz is not None:
+            means = self.frequency_values_hz
+            mask = (means > peak_min_hz) & (means < peak_max_hz)
+            gamma_hz_list = means[mask]
+            if gamma_hz_list.size == 0:
+                return False, np.array([]), np.array([])
+            weights = np.ones_like(gamma_hz_list, dtype=float)
+            return True, gamma_hz_list, weights
+
         spikes_list, layout_list, start_times, end_times = self.ds.to_legacy()
         # Build IFR analyzer that respects the same electrode selection policy
         if self._selection_cfg is not None:

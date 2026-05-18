@@ -7,7 +7,9 @@ import pandas as pd
 
 from ephax import PrepConfig, Recording, RestingActivityDataset, workflows
 from ephax.metrics.burst import (
+    activity_state_kde_peak_frequencies,
     align_highres_to_anchors,
+    binned_kde_peak_summary,
     build_highres_traces,
     build_network_activity_state,
     build_participation_activity_state,
@@ -17,6 +19,7 @@ from ephax.metrics.burst import (
     detect_nested_gamma_anchors,
     detect_network_burst_epochs,
     detect_participation_burst_epochs,
+    extract_activity_state_ifr,
     order_aligned_rate_by_summary,
     order_aligned_rate_by_x,
     refine_participation_burst_anchors,
@@ -24,6 +27,7 @@ from ephax.metrics.burst import (
 )
 from ephax.plotting.burst import (
     plot_aligned_electrode_heatmap,
+    plot_activity_state_ifr_kde_histograms,
     plot_gamma_population_windows,
     plot_high_activity_burst_windows,
     plot_macro_burst_detector_comparison_windows,
@@ -101,6 +105,57 @@ def test_burst_metrics_extract_notebook_core_path():
     assert summary["electrode"].tolist()
     assert ordered_electrodes.size == ordered_rate.shape[0]
     assert len(x_layout) == x_rate.shape[0]
+
+
+def test_extract_activity_state_ifr_splits_raw_isi_samples():
+    spikes = {
+        "time": np.array([0.00, 0.10, 0.20, 0.30, 1.00, 1.05]),
+        "channel": np.ones(6, dtype=int),
+        "amplitude": np.ones(6),
+        "electrode": np.full(6, 101, dtype=int),
+    }
+    layout = {
+        "channel": np.array([1]),
+        "electrode": np.array([101]),
+        "x": np.array([0.0]),
+        "y": np.array([0.0]),
+    }
+    rec = Recording(spikes=spikes, layout=layout, start_time=0.0, end_time=1.1, sf=1000.0)
+    high_epochs = pd.DataFrame([{"start_time_s": 0.10, "end_time_s": 0.32}])
+    burst_epochs = pd.DataFrame([{"start_time_s": 0.24, "end_time_s": 0.28}])
+
+    states = extract_activity_state_ifr(rec, np.array([101]), high_epochs, burst_epochs)
+
+    assert np.allclose(states["high_activity"], [10.0])
+    assert np.allclose(states["burst"], [10.0])
+    assert states["low_activity"].size == 3
+
+
+def test_binned_kde_peak_summary_and_frequency_merge():
+    rng = np.random.default_rng(0)
+    high_values = np.concatenate([rng.normal(18.0, 0.8, 200), rng.normal(45.0, 1.0, 300)])
+    burst_values = np.concatenate([rng.normal(28.0, 0.9, 200), rng.normal(90.0, 2.0, 300)])
+    high_hist = binned_kde_peak_summary(high_values, log_bins=False, n_bins=80, grid_size=1024)
+    burst_hist = binned_kde_peak_summary(burst_values, log_bins=False, n_bins=80, grid_size=1024)
+
+    assert high_hist["peak_hz"].size >= 1
+    assert burst_hist["peak_hz"].size >= 1
+    assert np.all(np.diff(high_hist["peak_counts"]) <= 0)
+
+    freqs = activity_state_kde_peak_frequencies(
+        {"high_activity": high_hist, "burst": burst_hist},
+        min_peak_hz=30.0,
+    )
+
+    assert freqs.size >= 2
+    assert np.all(freqs > 30.0)
+    assert np.all(np.diff(freqs) > 0)
+
+    fig, _axes = plot_activity_state_ifr_kde_histograms(
+        {"high_activity": high_hist, "burst": burst_hist},
+        {"high_activity": high_values, "burst": burst_values},
+    )
+    plt.close(fig)
 
 
 def test_network_activity_detector_requires_participating_electrodes():

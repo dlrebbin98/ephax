@@ -1,6 +1,7 @@
 """Plotting helpers that are separate from metric computation."""
 
 from .burst import (
+    plot_activity_state_ifr_kde_histograms,
     plot_aligned_electrode_heatmap,
     plot_gamma_population_windows,
     plot_high_activity_burst_windows,
@@ -22,6 +23,7 @@ __all__ = [
     "plot_cofiring_heatmap",
     "plot_binned_distance_series",
     "plot_aligned_electrode_heatmap",
+    "plot_activity_state_ifr_kde_histograms",
     "plot_high_activity_burst_windows",
     "plot_macro_burst_detector_comparison_windows",
     "plot_ifr_histogram",
