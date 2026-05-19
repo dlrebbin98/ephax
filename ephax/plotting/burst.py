@@ -11,6 +11,7 @@ from matplotlib.colors import LogNorm
 from matplotlib.ticker import LogFormatterMathtext, LogLocator
 
 from ..models import AlignedBurstEvents, NetworkActivityState, PopulationIFR
+from .style import COLORMAPS, LINE_WIDTHS, PAPER_COLORS, UNIT_LABELS, figure_mode_defaults, resolve_figure_size
 
 
 def plot_population_ifr_summary(
@@ -20,52 +21,113 @@ def plot_population_ifr_summary(
     mean_title: str = "Population mean IFR",
     mean_log_scale: bool = False,
     smooth_sigma_sec: float | None = None,
+    mode="standalone",
+    figsize: str | tuple[float, float] = "wide_single",
 ):
     """Plot selected-electrode IFR heatmap plus population mean trace."""
+    defaults = figure_mode_defaults(mode)
+    fig = plt.figure(figsize=resolve_figure_size(figsize), constrained_layout=True)
+    axes = population_ifr_summary_axes_factory(fig, fig.add_gridspec(1, 1)[0, 0])
+    draw_population_ifr_summary(
+        population,
+        axes,
+        heatmap_title=heatmap_title,
+        mean_title=mean_title,
+        mean_log_scale=mean_log_scale,
+        smooth_sigma_sec=smooth_sigma_sec,
+        compact=defaults.compact,
+        show_colorbar=defaults.show_colorbar,
+        show_legend=defaults.show_legend,
+    )
+    return fig, (axes[0], axes[1])
+
+
+def draw_population_ifr_summary(
+    population: PopulationIFR,
+    axes,
+    *,
+    heatmap_title: str = "Electrode IFR matrix",
+    mean_title: str = "Population mean IFR",
+    mean_log_scale: bool = False,
+    smooth_sigma_sec: float | None = None,
+    compact: bool = False,
+    show_colorbar: bool | None = True,
+    show_legend: bool | None = True,
+):
+    """Draw selected-electrode IFR heatmap plus population mean trace into axes."""
+    ax_heatmap, ax_mean, cax = _unpack_population_axes(axes)
     positive = population.ifr_matrix[population.ifr_matrix > 0]
     if positive.size == 0:
         raise ValueError("IFR matrix contains no positive values for log-scale plotting.")
     vmin = max(1e-3, float(np.quantile(positive, 0.01)))
     vmax = max(float(positive.max()), vmin * (1.0 + 1e-6))
 
-    fig = plt.figure(figsize=(14, 8), constrained_layout=True)
-    gs = fig.add_gridspec(2, 2, height_ratios=[3.0, 1.6], width_ratios=[40.0, 1.6])
-    ax_heatmap = fig.add_subplot(gs[0, 0])
-    ax_mean = fig.add_subplot(gs[1, 0], sharex=ax_heatmap)
-    cax = fig.add_subplot(gs[0, 1])
-    fig.add_subplot(gs[1, 1]).axis("off")
-
     im = ax_heatmap.imshow(
         np.clip(population.ifr_matrix, vmin, vmax),
         aspect="auto",
         origin="lower",
         extent=[population.time_grid[0], population.time_grid[-1], 0.5, population.ifr_matrix.shape[0] + 0.5],
-        cmap="viridis",
+        cmap=COLORMAPS["heatmap"],
         norm=LogNorm(vmin=vmin, vmax=vmax),
     )
     ax_heatmap.set_ylabel("Selected electrode rank")
     ax_heatmap.set_yticks([1, population.ifr_matrix.shape[0]])
-    ax_heatmap.set_title(heatmap_title)
-    _format_log_colorbar(fig.colorbar(im, cax=cax), "Instantaneous firing rate (Hz, log scale)")
+    if not compact:
+        ax_heatmap.set_title(heatmap_title)
+    cbar = None
+    if show_colorbar is not False:
+        cbar = ax_heatmap.figure.colorbar(im, cax=cax) if cax is not None else ax_heatmap.figure.colorbar(im, ax=ax_heatmap)
+        _format_log_colorbar(cbar, "Instantaneous firing rate (Hz, log scale)")
+    elif cax is not None:
+        cax.axis("off")
 
     smooth_label = "Smoothed mean IFR"
     if smooth_sigma_sec is not None:
         smooth_label = f"{smooth_label} (sigma={smooth_sigma_sec:.2f} s)"
     if mean_log_scale:
         floor = max(vmin, 1e-3)
-        ax_mean.plot(population.time_grid, np.clip(population.mean_ifr, floor, None), color="0.70", lw=1.0, label="Population mean IFR")
-        ax_mean.plot(population.time_grid, np.clip(population.mean_ifr_smooth, floor, None), color="black", lw=2.0, label=smooth_label)
+        ax_mean.plot(population.time_grid, np.clip(population.mean_ifr, floor, None), color="0.70", lw=LINE_WIDTHS["thin"], label="Population mean IFR")
+        ax_mean.plot(population.time_grid, np.clip(population.mean_ifr_smooth, floor, None), color="black", lw=LINE_WIDTHS["emphasis"], label=smooth_label)
         ax_mean.set_yscale("log")
         ax_mean.set_ylabel("Hz (log scale)")
     else:
-        ax_mean.plot(population.time_grid, population.mean_ifr, color="0.70", lw=1.0, label="Population mean IFR")
-        ax_mean.plot(population.time_grid, population.mean_ifr_smooth, color="black", lw=2.0, label=smooth_label)
+        ax_mean.plot(population.time_grid, population.mean_ifr, color="0.70", lw=LINE_WIDTHS["thin"], label="Population mean IFR")
+        ax_mean.plot(population.time_grid, population.mean_ifr_smooth, color="black", lw=LINE_WIDTHS["emphasis"], label=smooth_label)
         ax_mean.set_ylabel("Hz")
-    ax_mean.set_xlabel("Time (s)")
-    ax_mean.set_title(mean_title)
-    ax_mean.legend(loc="upper right")
+    ax_mean.set_xlabel(UNIT_LABELS["time_s"])
+    if not compact:
+        ax_mean.set_title(mean_title)
+    if show_legend is not False:
+        ax_mean.legend(loc="upper right")
     ax_mean.set_xlim(float(population.time_grid[0]), float(population.time_grid[-1]))
-    return fig, (ax_heatmap, ax_mean)
+    return {
+        "heatmap": im,
+        "mappable": im,
+        "colorbar": cbar,
+        "colorbar_label": "Instantaneous firing rate (Hz, log scale)",
+        "mean": ax_mean,
+    }
+
+
+def population_ifr_summary_axes_factory(fig, subplotspec):
+    """Create the nested axes bundle used by a population IFR summary panel."""
+    gs = subplotspec.subgridspec(2, 2, height_ratios=[3.0, 1.6], width_ratios=[40.0, 1.6])
+    ax_heatmap = fig.add_subplot(gs[0, 0])
+    ax_mean = fig.add_subplot(gs[1, 0], sharex=ax_heatmap)
+    cax = fig.add_subplot(gs[0, 1])
+    fig.add_subplot(gs[1, 1]).axis("off")
+    return ax_heatmap, ax_mean, cax
+
+
+def _unpack_population_axes(axes):
+    if isinstance(axes, dict):
+        return axes["heatmap"], axes["mean"], axes.get("colorbar")
+    if isinstance(axes, (list, tuple)):
+        if len(axes) == 2:
+            return axes[0], axes[1], None
+        if len(axes) == 3:
+            return axes[0], axes[1], axes[2]
+    raise ValueError("population IFR axes must be (heatmap, mean), (heatmap, mean, colorbar), or a matching dict.")
 
 
 def plot_activity_state_ifr_kde_histograms(
@@ -84,8 +146,9 @@ def plot_activity_state_ifr_kde_histograms(
         "burst": "Burst",
     }
     state_colors = state_colors or {
-        "high_activity": "tab:green",
-        "burst": "tab:blue",
+        "low_activity": PAPER_COLORS["low_activity"],
+        "high_activity": PAPER_COLORS["high_activity"],
+        "burst": PAPER_COLORS["burst"],
     }
     states = list(states)
     fig, axes = plt.subplots(1, len(states), figsize=(7.5 * len(states), 4.8), squeeze=False, constrained_layout=True)
@@ -114,8 +177,8 @@ def plot_activity_state_ifr_kde_histograms(
         ax.set_xlabel("Instantaneous firing rate (Hz)")
         ax.set_ylabel("Count")
         ax.set_title(f"{state_labels.get(state, state)} IFR histogram (n={values.size:,})")
-        ax.grid(True, which="both", axis="x", alpha=0.18)
-        ax.legend(loc="upper right")
+        ax.grid(False)
+        ax.legend(loc="upper left")
 
     if source_label:
         fig.suptitle(f"Binned-KDE maxima from {source_label}")
@@ -319,8 +382,24 @@ def plot_high_activity_burst_windows(
         ax.set_ylabel("Hz")
         ax.set_xlim(start_s, stop_s)
 
-        _shade_epochs(ax, high_activity_epochs, start_s, stop_s, color="tab:green", alpha=0.13, label="High activity" if panel_idx == 0 else None)
-        _shade_epochs(ax, burst_epochs, start_s, stop_s, color="tab:blue", alpha=0.20, label="Participation burst" if panel_idx == 0 else None)
+        _shade_epochs(
+            ax,
+            high_activity_epochs,
+            start_s,
+            stop_s,
+            color=PAPER_COLORS["high_activity"],
+            alpha=0.13,
+            label="High activity" if panel_idx == 0 else None,
+        )
+        _shade_epochs(
+            ax,
+            burst_epochs,
+            start_s,
+            stop_s,
+            color=PAPER_COLORS["burst"],
+            alpha=0.20,
+            label="Participation burst" if panel_idx == 0 else None,
+        )
         _scatter_burst_anchors(ax, burst_epochs, start_s, stop_s, time_grid, mean_ifr, floor, label="Burst activity anchor" if panel_idx == 0 else None)
 
         ax2 = ax.twinx()

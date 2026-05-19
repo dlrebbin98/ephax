@@ -1,25 +1,83 @@
 """Plotting helpers that are separate from metric computation."""
 
 from .burst import (
+    draw_population_ifr_summary,
     plot_activity_state_ifr_kde_histograms,
     plot_aligned_electrode_heatmap,
     plot_gamma_population_windows,
     plot_high_activity_burst_windows,
     plot_macro_burst_detector_comparison_windows,
     plot_population_ifr_summary,
+    population_ifr_summary_axes_factory,
     save_average_hex_gif,
 )
-from .cofiring import plot_cofiring_heatmap
+from .cofiring import draw_cofiring_heatmap, plot_cofiring_heatmap
+from .compound import ComposedFigure, PanelGroupSpec, PanelRenderSpec, compose_figure, figure, group, panel
+from .export import export_figure
 from .firing_distance import plot_binned_distance_series
 from .ifr import (
+    draw_ifr_timeseries_panel,
+    ifr_timeseries_axes_factory,
     plot_ifr_histogram,
     plot_ifr_timeseries,
     plot_ifr_timeseries_panel,
     plot_ifr_timeseries_panels,
 )
-from .style import truncate_colormap
+from .layout import FigureSpec, PanelSpec, layout_preset, make_figure_grid
+from .layout_grid import draw_grid_avghz
+from .panels import add_panel_bundle_label, add_panel_label, add_panel_suptitle, add_scale_bar
+from .style import (
+    NATURE_STYLE,
+    PAPER_COLORS,
+    PAPER_FONT_FAMILY,
+    NatureFigureStyle,
+    figure_mode_defaults,
+    apply_ephax_style,
+    apply_nature_style,
+    apply_paper_style,
+    mm_to_inches,
+    nature_figure_check,
+    nature_figure_size,
+    resolve_figure_size,
+    standalone_figure_size,
+    truncate_colormap,
+)
 
 __all__ = [
+    "ComposedFigure",
+    "FigureSpec",
+    "PanelRenderSpec",
+    "PanelGroupSpec",
+    "PanelSpec",
+    "NatureFigureStyle",
+    "NATURE_STYLE",
+    "PAPER_COLORS",
+    "PAPER_FONT_FAMILY",
+    "add_panel_label",
+    "add_panel_bundle_label",
+    "add_panel_suptitle",
+    "add_scale_bar",
+    "apply_ephax_style",
+    "apply_nature_style",
+    "apply_paper_style",
+    "compose_figure",
+    "draw_cofiring_heatmap",
+    "draw_ifr_timeseries_panel",
+    "draw_grid_avghz",
+    "draw_population_ifr_summary",
+    "export_figure",
+    "figure",
+    "figure_mode_defaults",
+    "group",
+    "ifr_timeseries_axes_factory",
+    "layout_preset",
+    "make_figure_grid",
+    "mm_to_inches",
+    "nature_figure_check",
+    "nature_figure_size",
+    "panel",
+    "resolve_figure_size",
+    "standalone_figure_size",
     "plot_cofiring_heatmap",
     "plot_binned_distance_series",
     "plot_aligned_electrode_heatmap",
@@ -32,6 +90,7 @@ __all__ = [
     "plot_ifr_timeseries_panels",
     "plot_gamma_population_windows",
     "plot_population_ifr_summary",
+    "population_ifr_summary_axes_factory",
     "save_average_hex_gif",
     "truncate_colormap",
 ]

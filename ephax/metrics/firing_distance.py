@@ -3,12 +3,8 @@ from __future__ import annotations
 from typing import Iterable
 
 import numpy as np
-import pandas as pd
-from scipy.stats import binned_statistic
 
 from ..models import BinnedSeries, CofiringDistanceResult, FRDistanceResult
-from ..preprocessing.geometry import assign_r_distance, assign_r_distance_all
-from .cofiring import cofiring_proportions
 
 
 def avg_rate_vs_distance(
@@ -20,32 +16,37 @@ def avg_rate_vs_distance(
     max_distance: float = 3500,
 ) -> FRDistanceResult:
     """Compute firing rate for electrode/ref pairs and bin by distance."""
-    all_rates: list[float] = []
-    all_dists: list[float] = []
+    all_rates: list[np.ndarray] = []
+    all_dists: list[np.ndarray] = []
 
     for rec, refs in zip(recordings, refs_per_recording):
-        refs = [] if refs is None else list(refs)
-        if len(refs) == 0:
+        prepared = _prepare_recording_distance_inputs(rec, refs)
+        if prepared is None:
             continue
-        spikes_df = pd.DataFrame(rec.spikes)
-        layout_df = pd.DataFrame(rec.layout)
-        spikes_df, distances_df = assign_r_distance_all(spikes_df, layout_df, refs)
-
-        mask_t = (spikes_df["time"] >= rec.start_time) & (spikes_df["time"] <= rec.end_time)
-        spikes_df_during = spikes_df[mask_t]
         duration = float(rec.end_time - rec.start_time)
         if duration <= 0:
             continue
 
-        counts = spikes_df_during["electrode"].value_counts().reset_index()
-        counts.columns = ["electrode", "counts"]
-        counts["firing_rate"] = counts["counts"] / duration
-        merged = pd.merge(counts, distances_df, on="electrode", how="inner")
-        merged = merged[merged["electrode"] != merged["ref_electrode"]]
-        all_rates.extend(merged["firing_rate"].astype(float).tolist())
-        all_dists.extend(merged["distance"].astype(float).tolist())
+        electrodes, coords, refs_arr, ref_coords, spike_electrodes, _spike_times = prepared
+        active_electrodes, counts = np.unique(spike_electrodes, return_counts=True)
+        active_idx = _indices_for_values(electrodes, active_electrodes)
+        valid_active = active_idx >= 0
+        if not np.any(valid_active):
+            continue
+        active_electrodes = active_electrodes[valid_active]
+        active_coords = coords[active_idx[valid_active]]
+        active_rates = counts[valid_active].astype(float) / duration
 
-    return _fr_result(all_dists, all_rates, log=log, min_distance=min_distance, max_distance=max_distance)
+        dists = _pairwise_distances(ref_coords, active_coords)
+        keep = active_electrodes[None, :] != refs_arr[:, None]
+        if not np.any(keep):
+            continue
+        all_dists.append(dists[keep].astype(float, copy=False))
+        all_rates.append(np.broadcast_to(active_rates, dists.shape)[keep].astype(float, copy=False))
+
+    distances = np.concatenate(all_dists) if all_dists else np.array([], dtype=float)
+    rates = np.concatenate(all_rates) if all_rates else np.array([], dtype=float)
+    return _fr_result(distances, rates, log=log, min_distance=min_distance, max_distance=max_distance)
 
 
 def cofiring_avg_vs_distance(
@@ -58,44 +59,65 @@ def cofiring_avg_vs_distance(
     max_distance: float = 3500,
 ) -> CofiringDistanceResult:
     """Compute co-firing probability for electrode/ref pairs and bin by distance."""
-    all_props: list[float] = []
-    all_dists: list[float] = []
+    all_props: list[np.ndarray] = []
+    all_dists: list[np.ndarray] = []
     pm_sec = float(plusminus_ms) / 1000.0
-    window_size_sec = 2.0 * pm_sec
-    delay_sec = -pm_sec
 
     for rec, refs in zip(recordings, refs_per_recording):
-        refs = [] if refs is None else list(refs)
-        if len(refs) == 0:
+        prepared = _prepare_recording_distance_inputs(rec, refs)
+        if prepared is None:
             continue
-        spikes_df_full = pd.DataFrame(rec.spikes)
-        layout_df_full = pd.DataFrame(rec.layout)
-        mask_t = (spikes_df_full["time"] >= rec.start_time) & (spikes_df_full["time"] <= rec.end_time)
-        spikes_df_window = spikes_df_full[mask_t].copy()
 
-        for ref in refs:
-            spikes_df, layout_df = assign_r_distance(spikes_df_window.copy(), layout_df_full.copy(), int(ref))
-            firing_times = spikes_df["time"][spikes_df["electrode"] == int(ref)]
-            props = cofiring_proportions(
-                spikes_df,
-                firing_times,
-                window_size=window_size_sec,
-                delay=delay_sec,
-                ref_electrode=int(ref),
-            )
-            for electrode, proportion in props.items():
-                if electrode == int(ref):
+        electrodes, coords, refs_arr, ref_coords, spike_electrodes, spike_times = prepared
+        active_electrodes = np.unique(spike_electrodes)
+        active_idx = _indices_for_values(electrodes, active_electrodes)
+        valid_active = active_idx >= 0
+        if not np.any(valid_active):
+            continue
+        active_electrodes = active_electrodes[valid_active]
+        active_coords = coords[active_idx[valid_active]]
+        times_by_electrode = _sorted_spike_times_by_electrode(spike_electrodes, spike_times)
+
+        for ref, ref_coord in zip(refs_arr, ref_coords):
+            ref_times = times_by_electrode.get(int(ref), np.array([], dtype=float))
+            if ref_times.size == 0:
+                target_electrodes = active_electrodes[active_electrodes != int(ref)]
+                if target_electrodes.size == 0:
                     continue
-                all_props.append(float(proportion))
-                distance = layout_df.loc[layout_df["electrode"] == electrode, "distance"].values[0]
-                all_dists.append(float(distance))
+                target_idx = _indices_for_values(electrodes, target_electrodes)
+                valid_targets = target_idx >= 0
+                if not np.any(valid_targets):
+                    continue
+                target_coords = coords[target_idx[valid_targets]]
+                all_dists.append(_pairwise_distances(ref_coord[None, :], target_coords).reshape(-1))
+                all_props.append(np.zeros(target_coords.shape[0], dtype=float))
+                continue
 
-    return _cofiring_result(all_dists, all_props, log=log, min_distance=min_distance, max_distance=max_distance)
+            starts = ref_times - pm_sec
+            ends = ref_times + pm_sec
+            props: list[float] = []
+            target_coords_list: list[np.ndarray] = []
+            for electrode, coord in zip(active_electrodes, active_coords):
+                if int(electrode) == int(ref):
+                    continue
+                target_times = times_by_electrode.get(int(electrode), np.array([], dtype=float))
+                count = _count_events_in_windows(target_times, starts, ends)
+                props.append(float(count) / float(ref_times.size))
+                target_coords_list.append(coord)
+            if not props:
+                continue
+            target_coords = np.asarray(target_coords_list, dtype=float)
+            all_dists.append(_pairwise_distances(ref_coord[None, :], target_coords).reshape(-1))
+            all_props.append(np.asarray(props, dtype=float))
+
+    distances = np.concatenate(all_dists) if all_dists else np.array([], dtype=float)
+    props = np.concatenate(all_props) if all_props else np.array([], dtype=float)
+    return _cofiring_result(distances, props, log=log, min_distance=min_distance, max_distance=max_distance)
 
 
 def _fr_result(
-    distances: list[float],
-    rates: list[float],
+    distances: list[float] | np.ndarray,
+    rates: list[float] | np.ndarray,
     *,
     log: bool,
     min_distance: float,
@@ -112,8 +134,8 @@ def _fr_result(
 
 
 def _cofiring_result(
-    distances: list[float],
-    proportions: list[float],
+    distances: list[float] | np.ndarray,
+    proportions: list[float] | np.ndarray,
     *,
     log: bool,
     min_distance: float,
@@ -142,13 +164,121 @@ def _bin_distance_series(
     else:
         bins = np.linspace(max(min_distance, float(distances.min())), max_distance, num=74)
 
-    bin_means, bin_edges, _ = binned_statistic(distances, values, statistic=np.nanmean, bins=bins)
-    bin_stderr, _, _ = binned_statistic(
-        distances,
-        values,
-        statistic=lambda x: np.std(x) / np.sqrt(len(x)),
-        bins=bins,
+    bin_idx = np.searchsorted(bins, distances, side="right") - 1
+    bin_idx[distances == bins[-1]] = bins.size - 2
+    in_range = (bin_idx >= 0) & (bin_idx < bins.size - 1) & np.isfinite(values)
+    bin_idx = bin_idx[in_range]
+    values = values[in_range]
+    n_bins = bins.size - 1
+    counts = np.bincount(bin_idx, minlength=n_bins).astype(float)
+    sums = np.bincount(bin_idx, weights=values, minlength=n_bins)
+    sums_sq = np.bincount(bin_idx, weights=values * values, minlength=n_bins)
+    means = np.divide(sums, counts, out=np.full(n_bins, np.nan, dtype=float), where=counts > 0)
+    variances = np.divide(sums_sq, counts, out=np.zeros(n_bins, dtype=float), where=counts > 0) - means * means
+    variances = np.maximum(variances, 0.0)
+    stderr = np.divide(np.sqrt(variances), np.sqrt(counts), out=np.full(n_bins, np.nan, dtype=float), where=counts > 0)
+    centers = (bins[:-1] + bins[1:]) / 2
+    valid = counts > 0
+    return bins, BinnedSeries(centers=centers[valid], mean=means[valid], stderr=stderr[valid])
+
+
+def _prepare_recording_distance_inputs(rec, refs):
+    refs = np.asarray([] if refs is None else list(refs), dtype=int)
+    if refs.size == 0:
+        return None
+
+    layout_electrodes = np.asarray(rec.layout["electrode"], dtype=int)
+    layout_channels = np.asarray(rec.layout.get("channel", layout_electrodes), dtype=int)
+    coords = np.column_stack([np.asarray(rec.layout["x"], dtype=float), np.asarray(rec.layout["y"], dtype=float)])
+
+    valid_layout = np.isfinite(coords).all(axis=1)
+    layout_electrodes = layout_electrodes[valid_layout]
+    layout_channels = layout_channels[valid_layout]
+    coords = coords[valid_layout]
+    if layout_electrodes.size == 0:
+        return None
+
+    _, first_idx = np.unique(layout_electrodes, return_index=True)
+    if first_idx.size != layout_electrodes.size:
+        first_idx = np.sort(first_idx)
+        layout_electrodes = layout_electrodes[first_idx]
+        layout_channels = layout_channels[first_idx]
+        coords = coords[first_idx]
+
+    ref_idx = _indices_for_values(layout_electrodes, refs)
+    valid_refs = ref_idx >= 0
+    if not np.any(valid_refs):
+        return None
+    refs = refs[valid_refs]
+    ref_coords = coords[ref_idx[valid_refs]]
+
+    spike_times = np.asarray(rec.spikes["time"], dtype=float)
+    if "channel" in rec.spikes:
+        spike_channels = np.asarray(rec.spikes["channel"], dtype=int)
+        channel_order = np.argsort(layout_channels)
+        sorted_channels = layout_channels[channel_order]
+        channel_pos = np.searchsorted(sorted_channels, spike_channels)
+        valid_pos = channel_pos < sorted_channels.size
+        valid_channel = np.zeros(spike_channels.shape, dtype=bool)
+        valid_channel[valid_pos] = sorted_channels[channel_pos[valid_pos]] == spike_channels[valid_pos]
+        spike_electrodes = np.empty(spike_channels.shape, dtype=int)
+        spike_electrodes[valid_channel] = layout_electrodes[channel_order[channel_pos[valid_channel]]]
+    else:
+        spike_electrodes = np.asarray(rec.spikes["electrode"], dtype=int)
+        valid_channel = np.ones(spike_electrodes.shape, dtype=bool)
+
+    in_window = (
+        valid_channel
+        & np.isfinite(spike_times)
+        & (spike_times >= float(rec.start_time))
+        & (spike_times <= float(rec.end_time))
     )
-    centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    valid = ~np.isnan(bin_means)
-    return bins, BinnedSeries(centers=centers[valid], mean=bin_means[valid], stderr=bin_stderr[valid])
+    spike_times = spike_times[in_window]
+    spike_electrodes = spike_electrodes[in_window]
+    valid_spike_electrode = _indices_for_values(layout_electrodes, spike_electrodes) >= 0
+    spike_times = spike_times[valid_spike_electrode]
+    spike_electrodes = spike_electrodes[valid_spike_electrode]
+    if spike_times.size == 0:
+        return layout_electrodes, coords, refs, ref_coords, spike_electrodes, spike_times
+
+    order = np.argsort(spike_times, kind="mergesort")
+    return layout_electrodes, coords, refs, ref_coords, spike_electrodes[order], spike_times[order]
+
+
+def _indices_for_values(sorted_or_unsorted_values: np.ndarray, values: np.ndarray) -> np.ndarray:
+    base = np.asarray(sorted_or_unsorted_values)
+    values = np.asarray(values)
+    out = np.full(values.shape, -1, dtype=int)
+    if base.size == 0 or values.size == 0:
+        return out
+    order = np.argsort(base)
+    sorted_base = base[order]
+    pos = np.searchsorted(sorted_base, values)
+    valid_pos = pos < sorted_base.size
+    valid = np.zeros(values.shape, dtype=bool)
+    valid[valid_pos] = sorted_base[pos[valid_pos]] == values[valid_pos]
+    out[valid] = order[pos[valid]]
+    return out
+
+
+def _pairwise_distances(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    diff = np.asarray(a, dtype=float)[:, None, :] - np.asarray(b, dtype=float)[None, :, :]
+    return np.sqrt(np.sum(diff * diff, axis=2))
+
+
+def _sorted_spike_times_by_electrode(spike_electrodes: np.ndarray, spike_times: np.ndarray) -> dict[int, np.ndarray]:
+    out = {}
+    for electrode in np.unique(spike_electrodes):
+        out[int(electrode)] = spike_times[spike_electrodes == electrode]
+    return out
+
+
+def _count_events_in_windows(times: np.ndarray, starts: np.ndarray, ends: np.ndarray) -> int:
+    if times.size == 0 or starts.size == 0:
+        return 0
+    idx = np.searchsorted(starts, times, side="right") - 1
+    valid = idx >= 0
+    if not np.any(valid):
+        return 0
+    idx_valid = idx[valid]
+    return int(np.count_nonzero(times[valid] <= ends[idx_valid]))

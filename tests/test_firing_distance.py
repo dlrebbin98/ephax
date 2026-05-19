@@ -38,7 +38,8 @@ def test_firing_distance_metrics_are_pure_compute_entry_points():
     assert isinstance(cofiring, CofiringDistanceResult)
     assert rate.distances.tolist() == [5.0, 5.0]
     assert rate.rates.tolist() == [2.0, 2.0]
-    assert cofiring.distances.size == 2
+    assert cofiring.distances.tolist() == [5.0, 5.0]
+    assert cofiring.proportions.tolist() == [0.5, 0.0]
 
 
 def test_firing_distance_analyzer_delegates_compute_to_metrics():
@@ -53,7 +54,8 @@ def test_firing_distance_analyzer_delegates_compute_to_metrics():
     cofiring = analyzer.cofiring_avg_vs_distance(plusminus_ms=150.0, min_distance=0, max_distance=10)
 
     assert rate.distances.tolist() == [5.0, 5.0]
-    assert cofiring.distances.size == 2
+    assert cofiring.distances.tolist() == [5.0, 5.0]
+    assert cofiring.proportions.tolist() == [0.5, 0.0]
 
 
 def test_firing_distance_analyzer_uses_fixed_frequency_values():

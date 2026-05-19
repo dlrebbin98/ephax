@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -62,6 +63,66 @@ class LayoutGridPlotter:
             safe_vmax = 1.0 if not np.isfinite(vmax) else float(max(vmax, safe_vmin + 1e-6))
             return Normalize(vmin=safe_vmin, vmax=safe_vmax)
         return LogNorm(vmin=float(vmin), vmax=float(vmax))
+
+    @staticmethod
+    def _format_recording_title(label: object, index: int) -> str:
+        text = str(label).strip() if label is not None else ""
+        if text:
+            div_match = re.search(r"(?<![A-Za-z0-9])DIV[_\s-]*(\d+)", text, flags=re.IGNORECASE)
+            well_match = re.search(r"(?<![A-Za-z0-9])well[_\s-]*(\d+)", text, flags=re.IGNORECASE)
+            if div_match and well_match:
+                return f"DIV {int(div_match.group(1))}: Well {int(well_match.group(1))}"
+            return text
+        return f"Recording {index + 1}"
+
+    @staticmethod
+    def _add_height_matched_colorbar(fig, mappable, axes, label: str):
+        """Add a colorbar matched to the rendered height of equal-aspect axes."""
+
+        if not isinstance(axes, (list, tuple, np.ndarray)):
+            axes = [axes]
+        axes = [ax for ax in np.asarray(axes, dtype=object).ravel().tolist() if ax.get_visible()]
+        if not axes:
+            return None
+
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        boxes = [
+            ax.get_window_extent(renderer=renderer).transformed(fig.transFigure.inverted())
+            for ax in axes
+        ]
+        left = min(box.x0 for box in boxes)
+        x1 = max(box.x1 for box in boxes)
+
+        pad = 0.012
+        width = 0.012
+        right_limit = 0.985
+        required_right = x1 + pad + width
+        if required_right > right_limit and x1 > left:
+            target_x1 = right_limit - pad - width
+            scale = max(0.1, (target_x1 - left) / (x1 - left))
+            for ax in axes:
+                pos = ax.get_position()
+                ax.set_position([
+                    left + (pos.x0 - left) * scale,
+                    pos.y0,
+                    pos.width * scale,
+                    pos.height,
+                ])
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            boxes = [
+                ax.get_window_extent(renderer=renderer).transformed(fig.transFigure.inverted())
+                for ax in axes
+            ]
+            x1 = max(box.x1 for box in boxes)
+
+        y0 = min(box.y0 for box in boxes)
+        y1 = max(box.y1 for box in boxes)
+        cax = fig.add_axes([x1 + pad, y0, width, y1 - y0])
+        cbar = fig.colorbar(mappable, cax=cax)
+        cbar.set_label(label)
+        return cbar
 
     @staticmethod
     def _interpolate_grid(
@@ -190,28 +251,17 @@ class LayoutGridPlotter:
         interpolate: bool = False,
         title: Optional[str] = None,
     ):
+        from ..plotting.layout_grid import draw_grid_avghz
+
         res = self.compute_grid_avghz_pooled(grid_size=grid_size, interpolate=interpolate)
-        fig, ax = plt.subplots(figsize=(10, 6))
-        grid_plot = self._sanitize_for_plot(res.grid)
-        finite_vals = grid_plot[np.isfinite(grid_plot)]
-        if finite_vals.size:
-            vmin = float(np.nanmin(finite_vals))
-            vmax = float(np.nanmax(finite_vals))
-        else:
-            vmin, vmax = np.nan, np.nan
-        norm = self._build_norm(vmin, vmax)
-        cmap = plt.get_cmap('magma').copy()
-        cmap.set_bad('black')
-        cax = ax.imshow(grid_plot.T, origin='lower', cmap=cmap, norm=norm,
-                        extent=[res.x_min, res.x_max, res.y_min, res.y_max])
-        ax.set_xlabel('X-coordinate ($\\mu m$)')
-        ax.set_ylabel('Y-coordinate ($\\mu m$)')
-        ax.set_title(title or 'Average Firing Rate (pooled)')
-        ax.set_facecolor('black')
-        cbar = fig.colorbar(cax, ax=ax, orientation='vertical')
-        cbar.set_label('Average Firing Rate (Hz)')
-        ax.grid(True)
-        ax.set_aspect('equal')
+        fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
+        rendered = draw_grid_avghz(
+            res,
+            ax,
+            title=self._format_recording_title(title, 0) if title else 'Average Firing Rate (pooled)',
+            show_colorbar=False,
+        )
+        self._add_height_matched_colorbar(fig, rendered["mappable"], ax, 'Average Firing Rate (Hz)')
         plt.show()
         return fig, ax
 
@@ -288,7 +338,13 @@ class LayoutGridPlotter:
         n = len(grids)
         ncols = max(1, int(ncols))
         nrows = int(np.ceil(n / ncols))
-        fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows), squeeze=False)
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(5 * ncols, 4 * nrows),
+            squeeze=False,
+            constrained_layout=True,
+        )
         # Compute global vmin/vmax across all grids for consistent LogNorm
         all_vals = []
         for res in grids:
@@ -324,10 +380,7 @@ class LayoutGridPlotter:
                             rec_title = recording_titles(idx)
                         elif idx < len(recording_titles):
                             rec_title = recording_titles[idx]
-                    if rec_title:
-                        ax.set_title(str(rec_title))
-                    else:
-                        ax.set_title(f'Recording {idx+1}')
+                    ax.set_title(self._format_recording_title(rec_title, idx))
                     # Match averaged plot background
                     ax.set_facecolor('black')
                 else:
@@ -336,13 +389,9 @@ class LayoutGridPlotter:
                 ax.set_xlabel('X ($\\mu m$)')
                 ax.set_ylabel('Y ($\\mu m$)')
                 idx += 1
-        if title:
-            fig.suptitle(title)
-            fig.tight_layout(rect=[0, 0, 1, 0.97])
-        else:
-            fig.tight_layout()
         # Single shared colorbar for all panels
         if last_im is not None:
-            fig.colorbar(last_im, ax=axes.ravel().tolist(), orientation='vertical', label='Average Firing Rate (Hz)')
+            plotted_axes = [ax for ax in axes.ravel().tolist() if ax.has_data()]
+            self._add_height_matched_colorbar(fig, last_im, plotted_axes, 'Average Firing Rate (Hz)')
         plt.show()
         return fig, axes
