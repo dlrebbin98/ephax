@@ -11,6 +11,7 @@ def plot_cofiring_heatmap(
     heatmap: CofiringHeatmap,
     normalize: bool = False,
     cmap_name: str = "magma",
+    title: str | None = None,
     show: bool = False,
     ax=None,
     mode="standalone",
@@ -24,6 +25,7 @@ def plot_cofiring_heatmap(
         ax,
         normalize=normalize,
         cmap_name=cmap_name,
+        title=title,
         compact=defaults.compact,
         show_colorbar=defaults.show_colorbar,
         show_legend=defaults.show_legend,
@@ -39,6 +41,7 @@ def draw_cofiring_heatmap(
     *,
     normalize: bool = False,
     cmap_name: str = "magma",
+    title: str | None = None,
     compact: bool = False,
     show_colorbar: bool | None = True,
     show_legend: bool | None = None,
@@ -61,8 +64,11 @@ def draw_cofiring_heatmap(
     image = ax.imshow(Z, aspect="auto", cmap=plt.get_cmap(cmap_name), extent=extent, origin="lower")
     ax.set_xlabel("Distance from Electrode ($\\mu m$)")
     ax.set_ylabel("Delay (ms)")
-    if not compact:
-        ax.set_title(f"{'Normalized ' if normalize else ''} p(Co-Firing) vs Distance and Time")
+    resolved_title = title
+    if resolved_title is None and not compact:
+        resolved_title = f"{'Normalized ' if normalize else ''} p(Co-Firing) vs Distance and Time"
+    if resolved_title:
+        ax.set_title(resolved_title)
     ax.set_facecolor("black")
     cbar = None
     if show_colorbar is not False:

@@ -7,11 +7,11 @@ import imageio.v2 as imageio
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm, Normalize
 from matplotlib.ticker import LogFormatterMathtext, LogLocator
 
 from ..models import AlignedBurstEvents, NetworkActivityState, PopulationIFR
-from .style import COLORMAPS, LINE_WIDTHS, PAPER_COLORS, UNIT_LABELS, figure_mode_defaults, resolve_figure_size
+from .style import COLORMAPS, FONT_SIZES, LINE_WIDTHS, PAPER_COLORS, UNIT_LABELS, figure_mode_defaults, resolve_figure_size
 
 
 def plot_population_ifr_summary(
@@ -48,14 +48,18 @@ def draw_population_ifr_summary(
     *,
     heatmap_title: str = "Electrode IFR matrix",
     mean_title: str = "Population mean IFR",
+    show_titles: bool | None = None,
     mean_log_scale: bool = False,
     smooth_sigma_sec: float | None = None,
     compact: bool = False,
     show_colorbar: bool | None = True,
-    show_legend: bool | None = True,
+    show_legend: bool | None = False,
+    colorbar_label: str | None = None,
 ):
     """Draw selected-electrode IFR heatmap plus population mean trace into axes."""
     ax_heatmap, ax_mean, cax = _unpack_population_axes(axes)
+    if show_titles is None:
+        show_titles = not compact
     positive = population.ifr_matrix[population.ifr_matrix > 0]
     if positive.size == 0:
         raise ValueError("IFR matrix contains no positive values for log-scale plotting.")
@@ -72,12 +76,13 @@ def draw_population_ifr_summary(
     )
     ax_heatmap.set_ylabel("Selected electrode rank")
     ax_heatmap.set_yticks([1, population.ifr_matrix.shape[0]])
-    if not compact:
+    if show_titles and heatmap_title:
         ax_heatmap.set_title(heatmap_title)
     cbar = None
     if show_colorbar is not False:
         cbar = ax_heatmap.figure.colorbar(im, cax=cax) if cax is not None else ax_heatmap.figure.colorbar(im, ax=ax_heatmap)
-        _format_log_colorbar(cbar, "Instantaneous firing rate (Hz, log scale)")
+        resolved_cbar_label = colorbar_label if colorbar_label is not None else ("IFR (Hz)" if compact else "Instantaneous firing rate (Hz, log scale)")
+        _format_log_colorbar(cbar, resolved_cbar_label)
     elif cax is not None:
         cax.axis("off")
 
@@ -95,7 +100,7 @@ def draw_population_ifr_summary(
         ax_mean.plot(population.time_grid, population.mean_ifr_smooth, color="black", lw=LINE_WIDTHS["emphasis"], label=smooth_label)
         ax_mean.set_ylabel("Hz")
     ax_mean.set_xlabel(UNIT_LABELS["time_s"])
-    if not compact:
+    if show_titles and mean_title:
         ax_mean.set_title(mean_title)
     if show_legend is not False:
         ax_mean.legend(loc="upper right")
@@ -104,7 +109,7 @@ def draw_population_ifr_summary(
         "heatmap": im,
         "mappable": im,
         "colorbar": cbar,
-        "colorbar_label": "Instantaneous firing rate (Hz, log scale)",
+        "colorbar_label": colorbar_label if colorbar_label is not None else ("IFR (Hz)" if compact else "Instantaneous firing rate (Hz, log scale)"),
         "mean": ax_mean,
     }
 
@@ -115,7 +120,9 @@ def population_ifr_summary_axes_factory(fig, subplotspec):
     ax_heatmap = fig.add_subplot(gs[0, 0])
     ax_mean = fig.add_subplot(gs[1, 0], sharex=ax_heatmap)
     cax = fig.add_subplot(gs[0, 1])
-    fig.add_subplot(gs[1, 1]).axis("off")
+    spacer_ax = fig.add_subplot(gs[1, 1])
+    spacer_ax.axis("off")
+    spacer_ax.set_in_layout(False)
     return ax_heatmap, ax_mean, cax
 
 
@@ -141,6 +148,42 @@ def plot_activity_state_ifr_kde_histograms(
     max_peak_labels: int = 6,
 ):
     """Plot activity-state IFR histograms with KDE-smoothed maxima."""
+    states = list(states)
+    fig, axes = plt.subplots(1, len(states), figsize=(7.5 * len(states), 4.8), squeeze=False, constrained_layout=True)
+    axes = axes.reshape(-1)
+    draw_activity_state_ifr_kde_histograms(
+        activity_kde_results,
+        axes,
+        activity_values=activity_values,
+        states=states,
+        state_labels=state_labels,
+        state_colors=state_colors,
+        source_label=source_label,
+        max_peak_labels=max_peak_labels,
+        compact=False,
+        show_legend=True,
+    )
+    if source_label:
+        fig.suptitle(f"Binned-KDE maxima from {source_label}")
+    return fig, axes
+
+
+def draw_activity_state_ifr_kde_histograms(
+    activity_kde_results: dict[str, dict[str, np.ndarray]],
+    axes,
+    *,
+    activity_values: dict[str, np.ndarray] | None = None,
+    states=("high_activity", "burst"),
+    state_labels: dict[str, str] | None = None,
+    state_colors: dict[str, str] | None = None,
+    source_label: str | None = None,
+    max_peak_labels: int = 6,
+    compact: bool = False,
+    show_legend: bool | None = True,
+    show_colorbar: bool | None = None,
+    hide_inner_xlabels: bool = True,
+):
+    """Draw activity-state IFR histograms with KDE-smoothed maxima into axes."""
     state_labels = state_labels or {
         "high_activity": "High activity, non-burst",
         "burst": "Burst",
@@ -151,14 +194,17 @@ def plot_activity_state_ifr_kde_histograms(
         "burst": PAPER_COLORS["burst"],
     }
     states = list(states)
-    fig, axes = plt.subplots(1, len(states), figsize=(7.5 * len(states), 4.8), squeeze=False, constrained_layout=True)
-    axes = axes.reshape(-1)
+    axes = np.atleast_1d(axes).reshape(-1)
+    if axes.size < len(states):
+        raise ValueError(f"Need at least {len(states)} axes for states={states!r}.")
+    activity_values = activity_values or {}
 
-    for ax, state in zip(axes, states):
+    artists = {}
+    for idx, (ax, state) in enumerate(zip(axes[: len(states)], states)):
         hist = activity_kde_results[state]
-        values = np.asarray(activity_values[state], dtype=float)
+        values = np.asarray(activity_values.get(state, []), dtype=float)
         widths = np.diff(hist["plot_edges_hz"])
-        ax.bar(
+        bars = ax.bar(
             hist["plot_centers_hz"],
             hist["counts"],
             width=widths,
@@ -169,20 +215,155 @@ def plot_activity_state_ifr_kde_histograms(
             align="center",
             label=state_labels.get(state, state),
         )
-        ax.plot(hist["grid_hz"], hist["smoothed_counts"], color=state_colors.get(state, "0.5"), lw=2.0)
-        ax.scatter(hist["peak_hz"], hist["peak_counts"], color="crimson", s=28, zorder=3, label="Binned-KDE maxima")
-        for peak_hz, peak_counts in zip(hist["peak_hz"][: int(max_peak_labels)], hist["peak_counts"][: int(max_peak_labels)]):
-            ax.text(float(peak_hz), float(peak_counts), f"{peak_hz:.2f}", fontsize=8, ha="left", va="bottom")
+        (line,) = ax.plot(
+            hist["grid_hz"],
+            hist["smoothed_counts"],
+            color=state_colors.get(state, "0.5"),
+            lw=LINE_WIDTHS["emphasis"],
+        )
+        peaks = ax.scatter(hist["peak_hz"], hist["peak_counts"], color="crimson", s=18 if compact else 28, zorder=3, label="Binned-KDE maxima")
+        if max_peak_labels:
+            for peak_hz, peak_counts in zip(hist["peak_hz"][: int(max_peak_labels)], hist["peak_counts"][: int(max_peak_labels)]):
+                ax.text(
+                    float(peak_hz),
+                    float(peak_counts),
+                    f"{peak_hz:.2f}",
+                    fontsize=FONT_SIZES["small"],
+                    ha="left",
+                    va="bottom",
+                )
         ax.set_xscale("log")
-        ax.set_xlabel("Instantaneous firing rate (Hz)")
+        positive_edges = np.asarray(hist["plot_edges_hz"], dtype=float)
+        positive_edges = positive_edges[np.isfinite(positive_edges) & (positive_edges > 0)]
+        if positive_edges.size >= 2:
+            ax.set_xlim(float(positive_edges[0]), float(positive_edges[-1]))
+        if compact and hide_inner_xlabels and idx < len(states) - 1:
+            ax.set_xlabel("")
+            ax.tick_params(axis="x", which="both", labelbottom=False)
+        else:
+            ax.set_xlabel("Instantaneous firing rate (Hz)")
         ax.set_ylabel("Count")
-        ax.set_title(f"{state_labels.get(state, state)} IFR histogram (n={values.size:,})")
+        if compact:
+            ax.set_title(state_labels.get(state, state), pad=2.0)
+        else:
+            ax.set_title(f"{state_labels.get(state, state)} IFR histogram (n={values.size:,})")
         ax.grid(False)
-        ax.legend(loc="upper left")
+        if show_legend is not False:
+            ax.legend(loc="upper left", fontsize=FONT_SIZES["small"])
+        artists[state] = {"bars": bars, "line": line, "peaks": peaks}
 
-    if source_label:
-        fig.suptitle(f"Binned-KDE maxima from {source_label}")
-    return fig, axes
+    for ax in axes[len(states):]:
+        ax.axis("off")
+    return {"axes": axes[: len(states)], "artists": artists, "source_label": source_label}
+
+
+def plot_electrode_peak_time_map(
+    peak_map: pd.DataFrame,
+    *,
+    title: str | None = None,
+    cmap: str = "coolwarm",
+    vmin: float | None = None,
+    vmax: float | None = None,
+    figsize: str | tuple[float, float] = "medium_single",
+    mode="standalone",
+):
+    """Plot an unbinned HD-MEA map colored by electrode peak-time latency."""
+    defaults = figure_mode_defaults(mode)
+    fig, ax = plt.subplots(figsize=resolve_figure_size(figsize), constrained_layout=True)
+    draw_electrode_peak_time_map(
+        peak_map,
+        ax,
+        title=title,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        compact=defaults.compact,
+        show_colorbar=defaults.show_colorbar,
+    )
+    return fig, ax
+
+
+def draw_electrode_peak_time_map(
+    peak_map: pd.DataFrame,
+    ax,
+    *,
+    title: str | None = None,
+    cmap: str = "coolwarm",
+    vmin: float | None = None,
+    vmax: float | None = None,
+    show_colorbar: bool | None = True,
+    compact: bool = True,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+    marker_size: float | None = None,
+    show_invalid: bool = True,
+):
+    """Draw an unbinned HD-MEA map colored by electrode peak-time latency."""
+    required = {"x", "y", "peak_time_ms", "valid"}
+    missing = required.difference(peak_map.columns)
+    if missing:
+        raise ValueError(f"peak_map is missing required columns: {sorted(missing)}")
+    plot_df = peak_map.copy()
+    valid = plot_df["valid"].astype(bool) & np.isfinite(plot_df["peak_time_ms"].to_numpy(dtype=float))
+    finite_times = plot_df.loc[valid, "peak_time_ms"].to_numpy(dtype=float)
+    if finite_times.size == 0:
+        raise ValueError("peak_map contains no valid finite peak_time_ms values.")
+    if vmin is None or vmax is None:
+        limit = float(np.nanmax(np.abs(finite_times)))
+        if not np.isfinite(limit) or limit <= 0:
+            limit = 1.0
+        vmin = -limit if vmin is None else float(vmin)
+        vmax = limit if vmax is None else float(vmax)
+
+    size = float(marker_size if marker_size is not None else (6.0 if compact else 10.0))
+    ax.set_facecolor("black")
+    if show_invalid and np.any(~valid):
+        ax.scatter(
+            plot_df.loc[~valid, "x"],
+            plot_df.loc[~valid, "y"],
+            s=size,
+            c="0.20",
+            edgecolors="none",
+            alpha=0.45,
+        )
+    scatter = ax.scatter(
+        plot_df.loc[valid, "x"],
+        plot_df.loc[valid, "y"],
+        c=plot_df.loc[valid, "peak_time_ms"],
+        s=size,
+        cmap=cmap,
+        norm=Normalize(vmin=float(vmin), vmax=float(vmax)),
+        edgecolors="none",
+        alpha=0.95,
+    )
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(False)
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    if compact:
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+    else:
+        ax.set_xlabel("x (um)")
+        ax.set_ylabel("y (um)")
+    if title:
+        ax.set_title(title)
+
+    colorbar = None
+    if show_colorbar is not False:
+        colorbar = ax.figure.colorbar(scatter, ax=ax)
+        colorbar.set_label("Electrode peak time relative to gamma anchor (ms)")
+    return {
+        "axes": ax,
+        "scatter": scatter,
+        "mappable": scatter,
+        "colorbar": colorbar,
+        "colorbar_label": "Electrode peak time relative to gamma anchor (ms)",
+    }
 
 
 def plot_gamma_population_windows(aligned: AlignedBurstEvents, *, title: str | None = None):
@@ -350,34 +531,98 @@ def plot_high_activity_burst_windows(
     participation_threshold: float | None = None,
     n_windows: int = 3,
     pad_s: float = 1.5,
+    window_order: str = "time",
 ):
     """Plot high-activity periods, nested bursts, and burst anchors."""
+    windows = select_high_activity_windows(high_activity_epochs, n_windows=n_windows, window_order=window_order)
+    fig, axes = plt.subplots(len(windows), 1, figsize=(14, max(3.2, 3.0 * len(windows))), sharex=False, constrained_layout=True)
+    axes = np.atleast_1d(axes)
+    draw_high_activity_burst_windows(
+        {
+            "time_grid": time_grid,
+            "mean_ifr": mean_ifr,
+            "mean_ifr_smooth": mean_ifr_smooth,
+            "network_activity": network_activity,
+            "high_activity_epochs": high_activity_epochs,
+            "burst_epochs": burst_epochs,
+            "high_activity_threshold_hz": high_activity_threshold_hz,
+            "participation_threshold": participation_threshold,
+        },
+        axes,
+        n_windows=n_windows,
+        pad_s=pad_s,
+        window_order=window_order,
+        compact=False,
+        show_legend=True,
+    )
+    return fig, axes
+
+
+def select_high_activity_windows(
+    high_activity_epochs: pd.DataFrame,
+    *,
+    n_windows: int = 3,
+    window_order: str = "time",
+) -> pd.DataFrame:
+    """Select high-activity windows for plotting."""
+    if high_activity_epochs.empty:
+        raise ValueError("high_activity_epochs is empty; no comparison windows are available.")
+    n_windows = max(1, int(n_windows))
+    if window_order in {"time", "start_time", "chronological"}:
+        return high_activity_epochs.sort_values("start_time_s").head(n_windows).reset_index(drop=True)
+    if window_order in {"peak_ifr", "peak", "highest_peak"}:
+        if "peak_mean_ifr_hz" not in high_activity_epochs:
+            raise ValueError("window_order='peak_ifr' requires a peak_mean_ifr_hz column.")
+        selected = high_activity_epochs.sort_values("peak_mean_ifr_hz", ascending=False).head(n_windows)
+        return selected.sort_values("start_time_s").reset_index(drop=True)
+    if window_order in {"duration", "longest"}:
+        if "duration_ms" not in high_activity_epochs:
+            raise ValueError("window_order='duration' requires a duration_ms column.")
+        selected = high_activity_epochs.sort_values("duration_ms", ascending=False).head(n_windows)
+        return selected.sort_values("start_time_s").reset_index(drop=True)
+    raise ValueError("window_order must be 'time', 'peak_ifr', or 'duration'.")
+
+
+def draw_high_activity_burst_windows(
+    data: dict[str, object],
+    axes,
+    *,
+    n_windows: int = 3,
+    pad_s: float = 1.5,
+    window_order: str = "time",
+    title: str | list[str] | tuple[str, ...] | None = None,
+    compact: bool = False,
+    show_legend: bool | None = True,
+    show_colorbar: bool | None = None,
+):
+    """Draw high-activity periods, nested bursts, and burst anchors into axes."""
+    time_grid = data["time_grid"]
+    mean_ifr = data["mean_ifr"]
+    mean_ifr_smooth = data["mean_ifr_smooth"]
+    network_activity = data["network_activity"]
+    high_activity_epochs = data["high_activity_epochs"]
+    burst_epochs = data["burst_epochs"]
+    high_activity_threshold_hz = data.get("high_activity_threshold_hz")
+    participation_threshold = data.get("participation_threshold")
+
     time_grid = np.asarray(time_grid, dtype=float)
     mean_ifr = np.asarray(mean_ifr, dtype=float)
     mean_ifr_smooth = np.asarray(mean_ifr_smooth, dtype=float)
-    if high_activity_epochs.empty:
-        raise ValueError("high_activity_epochs is empty; no comparison windows are available.")
-
-    windows = high_activity_epochs.sort_values("start_time_s").head(int(n_windows)).reset_index(drop=True)
-    fig, axes = plt.subplots(len(windows), 1, figsize=(14, max(3.2, 3.0 * len(windows))), sharex=False, constrained_layout=True)
-    axes = np.atleast_1d(axes)
+    windows = select_high_activity_windows(high_activity_epochs, n_windows=n_windows, window_order=window_order)
+    axes = np.atleast_1d(axes).reshape(-1)
+    if axes.size < len(windows):
+        raise ValueError(f"Need at least {len(windows)} axes for selected windows.")
     positive = mean_ifr[mean_ifr > 0]
     floor = max(1e-2, float(np.quantile(positive, 0.02))) if positive.size else 1e-2
+    participation_color = "tab:blue"
 
-    for panel_idx, (ax, window) in enumerate(zip(axes, windows.itertuples(index=False))):
+    secondary_axes = []
+    for panel_idx, (ax, window) in enumerate(zip(axes[: len(windows)], windows.itertuples(index=False))):
         start_s = max(float(time_grid[0]), float(window.start_time_s) - float(pad_s))
         stop_s = min(float(time_grid[-1]), float(window.end_time_s) + float(pad_s))
         mask = (time_grid >= start_s) & (time_grid <= stop_s)
-        ax.plot(time_grid[mask], np.clip(mean_ifr[mask], floor, None), color="black", lw=1.3, label="Population mean IFR" if panel_idx == 0 else None)
-        ax.plot(time_grid[mask], np.clip(mean_ifr_smooth[mask], floor, None), color="0.5", lw=1.1, label="Smoothed population IFR" if panel_idx == 0 else None)
-        if high_activity_threshold_hz is not None:
-            ax.axhline(
-                max(float(high_activity_threshold_hz), floor),
-                color="0.35",
-                ls="--",
-                lw=0.9,
-                label="High-activity threshold" if panel_idx == 0 else None,
-            )
+        ax.plot(time_grid[mask], np.clip(mean_ifr[mask], floor, None), color="black", lw=LINE_WIDTHS["base"], label="Population mean IFR" if panel_idx == 0 else None)
+        ax.plot(time_grid[mask], np.clip(mean_ifr_smooth[mask], floor, None), color="0.5", lw=LINE_WIDTHS["thin"], label="Smoothed population IFR" if panel_idx == 0 else None)
         ax.set_yscale("log")
         ax.set_ylabel("Hz")
         ax.set_xlim(start_s, stop_s)
@@ -407,34 +652,52 @@ def plot_high_activity_burst_windows(
         ax2.plot(
             network_activity.time_centers_s[state_mask],
             network_activity.participation_fraction[state_mask],
-            color="tab:blue",
+            color=participation_color,
             lw=1.0,
             alpha=0.9,
             label="Participation fraction" if panel_idx == 0 else None,
         )
-        if participation_threshold is not None:
-            ax2.axhline(
-                float(participation_threshold),
-                color="tab:blue",
-                ls="--",
-                lw=0.9,
-                alpha=0.8,
-                label="Participation threshold" if panel_idx == 0 else None,
-            )
         ymax = 0.25
         if np.any(state_mask):
             ymax = max(ymax, min(1.0, float(network_activity.participation_fraction[state_mask].max()) * 1.20))
         ax2.set_ylim(0.0, ymax)
-        ax2.set_ylabel("Participation")
-        ax.set_title(f"High-activity window {panel_idx + 1}: {float(window.start_time_s):.2f}-{float(window.end_time_s):.2f} s")
+        ax2.set_ylabel("" if compact else "Participation")
+        ax2.yaxis.label.set_color(participation_color)
+        ax2.tick_params(axis="y", colors=participation_color)
+        ax2.spines["right"].set_color(participation_color)
+        if compact:
+            ax2.set_yticks([])
+            ax2.tick_params(right=False, labelright=False)
+            ax2.spines["right"].set_visible(False)
+            ax2.set_in_layout(False)
+        secondary_axes.append(ax2)
+        panel_title = _resolve_panel_title(title, panel_idx)
+        if panel_title is not None:
+            ax.set_title(panel_title)
+        elif compact:
+            ax.set_title(f"{float(window.start_time_s):.2f}-{float(window.end_time_s):.2f} s")
+        else:
+            ax.set_title(f"High-activity window {panel_idx + 1}: {float(window.start_time_s):.2f}-{float(window.end_time_s):.2f} s")
 
-        if panel_idx == 0:
+        if panel_idx == 0 and show_legend is not False:
             lines, labels = ax.get_legend_handles_labels()
             lines2, labels2 = ax2.get_legend_handles_labels()
-            ax.legend(lines + lines2, labels + labels2, loc="upper right", ncol=2, fontsize=9)
+            ax.legend(lines + lines2, labels + labels2, loc="upper right", ncol=2, fontsize=FONT_SIZES["small"])
         if panel_idx == len(windows) - 1:
             ax.set_xlabel("Time (s)")
-    return fig, axes
+    for ax in axes[len(windows):]:
+        ax.axis("off")
+    return {"axes": axes[: len(windows)], "secondary_axes": secondary_axes, "windows": windows}
+
+
+def _resolve_panel_title(title, idx: int) -> str | None:
+    if title is None:
+        return None
+    if isinstance(title, str):
+        return title if idx == 0 else None
+    if idx < len(title):
+        return title[idx]
+    return None
 
 
 def _scatter_epoch_peaks(ax, epochs, start_s, stop_s, time_grid, mean_ifr, floor, *, color, marker, label):
@@ -459,7 +722,7 @@ def _scatter_burst_anchors(ax, burst_epochs, start_s, stop_s, time_grid, mean_if
     if times.size == 0:
         return
     values = np.clip(np.interp(times, time_grid, mean_ifr), floor, None)
-    ax.scatter(times, values, color="navy", marker="D", s=32, zorder=4, label=label)
+    ax.scatter(times, values, color="navy", marker="D", s=10, zorder=4, label=label)
 
 
 def save_average_hex_gif(

@@ -675,6 +675,35 @@ def refine_participation_burst_anchors(
     return refined
 
 
+def assign_max_population_ifr_burst_anchors(highres: HighResTraces, burst_epochs: pd.DataFrame) -> pd.DataFrame:
+    """Anchor each burst epoch at its maximum high-resolution population IFR."""
+    if burst_epochs.empty:
+        return burst_epochs.copy()
+
+    anchored = burst_epochs.copy()
+    if "anchor_time_s" in anchored:
+        anchored["participation_anchor_time_s"] = anchored["anchor_time_s"].astype(float)
+    else:
+        anchored["participation_anchor_time_s"] = np.nan
+    anchored["anchor_method"] = "max_highres_population_ifr"
+
+    for idx, row in anchored.iterrows():
+        mask = (highres.time_centers_s >= float(row["start_time_s"])) & (
+            highres.time_centers_s <= float(row["end_time_s"])
+        )
+        local_indices = np.flatnonzero(mask)
+        if local_indices.size == 0:
+            continue
+        local_rate = highres.population_rate_hz[local_indices]
+        anchor_idx = int(local_indices[int(np.nanargmax(local_rate))])
+        anchored.loc[idx, "anchor_time_s"] = float(highres.time_centers_s[anchor_idx])
+        anchored.loc[idx, "coarse_peak_time_s"] = float(highres.time_centers_s[anchor_idx])
+        anchored.loc[idx, "coarse_peak_idx"] = anchor_idx
+        anchored.loc[idx, "coarse_peak_hz"] = float(highres.population_rate_hz[anchor_idx])
+        anchored.loc[idx, "anchor_population_rate_hz"] = float(highres.population_rate_hz[anchor_idx])
+    return anchored
+
+
 def detect_network_burst_epochs(
     activity: NetworkActivityState,
     *,
@@ -1011,6 +1040,73 @@ def summarize_aligned_electrode_rates(
         )
         .reset_index(drop=True)
     )
+
+
+def compute_electrode_peak_time_map(
+    aligned: AlignedBurstEvents,
+    layout: dict | pd.DataFrame,
+    *,
+    window_idx: int | None = None,
+    peak_search_start_ms: float | None = None,
+    peak_search_stop_ms: float | None = None,
+    min_peak_rate_hz: float = 0.0,
+) -> pd.DataFrame:
+    """Map each aligned electrode to its peak-time latency and HD-MEA position."""
+    rel = np.asarray(aligned.relative_time_ms, dtype=float)
+    if rel.size == 0:
+        raise ValueError("aligned.relative_time_ms is empty.")
+    if aligned.aligned_rate.size == 0:
+        return pd.DataFrame(columns=["electrode", "x", "y", "peak_time_ms", "peak_rate_hz", "valid"])
+
+    start_ms = float(rel[0]) if peak_search_start_ms is None else float(peak_search_start_ms)
+    stop_ms = float(rel[-1]) if peak_search_stop_ms is None else float(peak_search_stop_ms)
+    if stop_ms < start_ms:
+        raise ValueError("peak_search_stop_ms must be greater than or equal to peak_search_start_ms.")
+    search_mask = (rel >= start_ms) & (rel <= stop_ms)
+    if not np.any(search_mask):
+        raise ValueError("The peak-search window does not overlap aligned.relative_time_ms.")
+    search_times = rel[search_mask]
+
+    if window_idx is None:
+        rate = np.asarray(aligned.aligned_rate, dtype=float).mean(axis=0)
+    else:
+        window_idx = int(window_idx)
+        if window_idx < 0 or window_idx >= aligned.aligned_rate.shape[0]:
+            raise IndexError(f"window_idx {window_idx} is out of range for {aligned.aligned_rate.shape[0]} aligned events.")
+        rate = np.asarray(aligned.aligned_rate[window_idx], dtype=float)
+
+    if rate.ndim != 2 or rate.shape[0] != len(aligned.electrodes) or rate.shape[1] != rel.size:
+        raise ValueError("aligned rate data must have shape electrodes x relative_time.")
+
+    search_rate = rate[:, search_mask]
+    finite_search = np.where(np.isfinite(search_rate), search_rate, -np.inf)
+    peak_idx = np.argmax(finite_search, axis=1)
+    peak_rate = finite_search[np.arange(finite_search.shape[0]), peak_idx]
+    peak_time = search_times[peak_idx]
+    valid = np.isfinite(peak_rate) & (peak_rate > float(min_peak_rate_hz))
+
+    peak_df = pd.DataFrame(
+        {
+            "electrode": np.asarray(aligned.electrodes, dtype=int),
+            "peak_time_ms": peak_time.astype(float),
+            "peak_rate_hz": peak_rate.astype(float),
+            "valid": valid.astype(bool),
+        }
+    )
+    layout_df = pd.DataFrame(layout).drop_duplicates("electrode")
+    layout_df = layout_df[["electrode", "x", "y"]].copy()
+    layout_df["electrode"] = layout_df["electrode"].astype(int)
+    out = layout_df.merge(peak_df, on="electrode", how="inner")
+    out = out.sort_values(["valid", "peak_time_ms", "electrode"], ascending=[False, True, True]).reset_index(drop=True)
+
+    if window_idx is not None:
+        out["window_idx"] = window_idx
+        anchors = pd.DataFrame(aligned.valid_anchors)
+        if 0 <= window_idx < len(anchors):
+            for col, value in anchors.iloc[window_idx].items():
+                if col not in out.columns and np.isscalar(value):
+                    out[col] = value
+    return out
 
 
 def order_aligned_rate_by_summary(aligned: AlignedBurstEvents, summary: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:

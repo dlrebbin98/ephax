@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-from .layout import FigureSpec, PanelSpec, add_panel_axes, make_figure_grid, panel_subplotspec, required_nrows
-from .panels import add_panel_bundle_label, add_panel_label, add_panel_suptitle
+from matplotlib.axes import Axes
+
+from .layout import FigureSpec, PanelSpec, make_figure_grid, panel_subplotspec, required_nrows
+from .panels import add_panel_label
+from .style import FONT_SIZES
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,7 @@ def panel(
     draw: Callable[..., Any] | None = None,
     data: Any = None,
     label: str | None = None,
+    title: str | None = None,
     loc: tuple[int, int, int, int] = (0, 0, 1, 12),
     compact: bool = True,
     show_legend: bool | None = None,
@@ -87,11 +91,14 @@ def panel(
     )
     if draw is None:
         return panel_spec
+    resolved_options = dict(options or {})
+    if title is not None:
+        resolved_options.setdefault("title", title)
     return PanelRenderSpec(
         panel=panel_spec,
         draw=draw,
         data=data,
-        options=options,
+        options=resolved_options,
         axes_factory=axes_factory,
     )
 
@@ -123,45 +130,37 @@ def compose_figure(fig_spec: FigureSpec, panel_specs: Sequence[PanelSpec | Panel
     panels = [_panel_from_spec(spec) for spec in panel_specs]
     fig, grid = make_figure_grid(fig_spec, nrows=required_nrows(panels))
     composed = ComposedFigure(fig=fig, grid=grid)
-    suptitled_labels: list[tuple[Any, str, Any]] = []
-    suptitles: list[tuple[Any, str, str | None]] = []
 
     for spec in panel_specs:
         panel = _panel_from_spec(spec)
+        content_spec, title_ax = _panel_content_spec(fig, grid, panel)
         if isinstance(spec, PanelGroupSpec):
-            group_axes, group_rendered = _render_group(fig, grid, spec)
+            group_axes, group_rendered = _render_group(fig, content_spec, spec)
             composed.axes[panel.key] = group_axes
             composed.rendered[panel.key] = group_rendered
-            if panel.label and not panel.suptitle:
+            if title_ax is not None:
+                _draw_panel_header(title_ax, panel.suptitle, panel.label)
+            elif panel.label:
                 add_panel_label(_label_axes(group_axes), panel.label)
-            if panel.suptitle:
-                suptitles.append((group_axes, panel.suptitle, panel.label))
         elif isinstance(spec, PanelRenderSpec):
-            axes = _make_axes(fig, grid, spec)
+            axes = _make_axes(fig, content_spec, spec)
             composed.axes[panel.key] = axes
-            if panel.label and not panel.suptitle:
+            if title_ax is not None:
+                _draw_panel_header(title_ax, panel.suptitle, panel.label)
+            elif panel.label:
                 add_panel_label(_label_axes(axes), panel.label)
             options = dict(spec.options or {})
             options.setdefault("compact", panel.compact)
             options.setdefault("show_legend", panel.show_legend)
             options.setdefault("show_colorbar", panel.show_colorbar)
             composed.rendered[panel.key] = spec.draw(spec.data, axes, **options)
-            if panel.suptitle:
-                suptitles.append((axes, panel.suptitle, panel.label))
         else:
-            axes = _make_axes(fig, grid, spec)
+            axes = _make_axes(fig, content_spec, spec)
             composed.axes[panel.key] = axes
-            if panel.label and not panel.suptitle:
+            if title_ax is not None:
+                _draw_panel_header(title_ax, panel.suptitle, panel.label)
+            elif panel.label:
                 add_panel_label(_label_axes(axes), panel.label)
-            if panel.suptitle:
-                suptitles.append((axes, panel.suptitle, panel.label))
-
-    for axes, title, label in suptitles:
-        title_text = add_panel_suptitle(axes, title)
-        if label:
-            suptitled_labels.append((axes, label, title_text))
-    for axes, label, title_text in suptitled_labels:
-        add_panel_bundle_label(axes, label, extra_artists=[title_text])
 
     return composed
 
@@ -195,19 +194,51 @@ def _panel_from_spec(spec: PanelSpec | PanelRenderSpec | PanelGroupSpec) -> Pane
     return spec.panel if isinstance(spec, (PanelRenderSpec, PanelGroupSpec)) else spec
 
 
-def _make_axes(fig, grid, spec: PanelSpec | PanelRenderSpec | PanelGroupSpec):
-    panel = _panel_from_spec(spec)
+def _panel_content_spec(fig, grid, panel: PanelSpec):
     subplotspec = panel_subplotspec(grid, panel)
+    if not panel.suptitle:
+        return subplotspec, None
+    title_grid = subplotspec.subgridspec(2, 1, height_ratios=[0.14, 1.0], hspace=0.15)
+    title_ax = fig.add_subplot(title_grid[0, 0])
+    title_ax.set_axis_off()
+    return title_grid[1, 0], title_ax
+
+
+def _draw_panel_header(ax, title: str | None, label: str | None):
+    if label:
+        ax.text(
+            0.0,
+            0.45,
+            label.lower() if len(label) == 1 and label.isalpha() else label,
+            ha="left",
+            va="center",
+            transform=ax.transAxes,
+            fontweight="bold",
+            fontstyle="normal",
+            fontsize=FONT_SIZES["panel_label"],
+        )
+    if title:
+        ax.text(
+            0.5,
+            0.45,
+            title,
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=FONT_SIZES["title"],
+        )
+
+
+def _make_axes(fig, subplotspec, spec: PanelSpec | PanelRenderSpec | PanelGroupSpec):
     if isinstance(spec, PanelGroupSpec):
         return fig.add_subplot(subplotspec)
     if isinstance(spec, PanelRenderSpec) and spec.axes_factory is not None:
         return spec.axes_factory(fig, subplotspec)
-    return add_panel_axes(fig, grid, panel)
+    return fig.add_subplot(subplotspec)
 
 
-def _render_group(fig, grid, spec: PanelGroupSpec):
+def _render_group(fig, parent_spec, spec: PanelGroupSpec):
     panel = spec.panel
-    parent_spec = panel_subplotspec(grid, panel)
     n_children = len(spec.children)
     if n_children < 1:
         raise ValueError(f"panel group {panel.key!r} must contain at least one child.")
@@ -256,8 +287,20 @@ def _make_child_axes(fig, subplotspec, child: PanelRenderSpec):
 
 
 def _label_axes(axes):
-    if isinstance(axes, Mapping):
-        return next(iter(axes.values()))
-    if isinstance(axes, (list, tuple)):
-        return axes[0]
-    return axes
+    for ax in _iter_axes(axes):
+        return ax
+    raise ValueError("Could not find a Matplotlib Axes for panel label placement.")
+
+
+def _iter_axes(axes):
+    if isinstance(axes, Axes):
+        yield axes
+    elif isinstance(axes, Mapping):
+        for value in axes.values():
+            yield from _iter_axes(value)
+    elif isinstance(axes, (list, tuple)):
+        for value in axes:
+            yield from _iter_axes(value)
+    elif hasattr(axes, "flat"):
+        for value in axes.flat:
+            yield from _iter_axes(value)

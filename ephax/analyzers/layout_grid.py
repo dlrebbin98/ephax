@@ -331,6 +331,8 @@ class LayoutGridPlotter:
         title: Optional[str] = None,
         recording_titles: Optional[Sequence[str] | Callable[[int], str]] = None,
     ):
+        from ..plotting.layout_grid import draw_grid_avghz_panel
+
         grids = self.compute_grid_avghz_per_recording(grid_size=grid_size, interpolate=interpolate)
         if not grids:
             print("No data to plot.")
@@ -345,53 +347,19 @@ class LayoutGridPlotter:
             squeeze=False,
             constrained_layout=True,
         )
-        # Compute global vmin/vmax across all grids for consistent LogNorm
-        all_vals = []
-        for res in grids:
-            vals = res.grid[np.isfinite(res.grid) & (res.grid > 1e-6)]
-            if vals.size:
-                all_vals.append(vals)
-        if all_vals:
-            concat = np.concatenate(all_vals)
-            concat = concat[np.isfinite(concat) & (concat > 0)]
-            if concat.size:
-                global_vmin = float(np.min(concat))
-                global_vmax = float(np.max(concat))
-            else:
-                global_vmin = global_vmax = np.nan
-        else:
-            global_vmin = global_vmax = np.nan
-        norm = self._build_norm(global_vmin, global_vmax)
-        idx = 0
-        last_im = None
-        for r in range(nrows):
-            for c in range(ncols):
-                ax = axes[r, c]
-                if idx < n:
-                    res = grids[idx]
-                    grid_plot = self._sanitize_for_plot(res.grid)
-                    cmap = plt.get_cmap('magma').copy()
-                    cmap.set_bad('black')
-                    last_im = ax.imshow(grid_plot.T, origin='lower', cmap=cmap, norm=norm,
-                                        extent=[res.x_min, res.x_max, res.y_min, res.y_max])
-                    rec_title = None
-                    if recording_titles is not None:
-                        if callable(recording_titles):
-                            rec_title = recording_titles(idx)
-                        elif idx < len(recording_titles):
-                            rec_title = recording_titles[idx]
-                    ax.set_title(self._format_recording_title(rec_title, idx))
-                    # Match averaged plot background
-                    ax.set_facecolor('black')
-                else:
-                    ax.axis('off')
-                ax.set_aspect('equal')
-                ax.set_xlabel('X ($\\mu m$)')
-                ax.set_ylabel('Y ($\\mu m$)')
-                idx += 1
-        # Single shared colorbar for all panels
-        if last_im is not None:
-            plotted_axes = [ax for ax in axes.ravel().tolist() if ax.has_data()]
-            self._add_height_matched_colorbar(fig, last_im, plotted_axes, 'Average Firing Rate (Hz)')
+        formatted_titles = None
+        if recording_titles is not None:
+            formatted_titles = [
+                self._format_recording_title(recording_titles(i) if callable(recording_titles) else recording_titles[i] if i < len(recording_titles) else None, i)
+                for i in range(n)
+            ]
+        draw_grid_avghz_panel(
+            grids,
+            axes,
+            recording_titles=formatted_titles,
+            compact=False,
+            show_colorbar=True,
+            colorbar_label="Average Firing Rate (Hz)",
+        )
         plt.show()
         return fig, axes

@@ -1,8 +1,12 @@
 """Plotting helpers that are separate from metric computation."""
 
 from .burst import (
+    draw_activity_state_ifr_kde_histograms,
+    draw_electrode_peak_time_map,
+    draw_high_activity_burst_windows,
     draw_population_ifr_summary,
     plot_activity_state_ifr_kde_histograms,
+    plot_electrode_peak_time_map,
     plot_aligned_electrode_heatmap,
     plot_gamma_population_windows,
     plot_high_activity_burst_windows,
@@ -10,6 +14,7 @@ from .burst import (
     plot_population_ifr_summary,
     population_ifr_summary_axes_factory,
     save_average_hex_gif,
+    select_high_activity_windows,
 )
 from .cofiring import draw_cofiring_heatmap, plot_cofiring_heatmap
 from .compound import ComposedFigure, PanelGroupSpec, PanelRenderSpec, compose_figure, figure, group, panel
@@ -24,7 +29,7 @@ from .ifr import (
     plot_ifr_timeseries_panels,
 )
 from .layout import FigureSpec, PanelSpec, layout_preset, make_figure_grid
-from .layout_grid import draw_grid_avghz
+from .layout_grid import draw_grid_avghz, draw_grid_avghz_panel, grid_avghz_panel_axes_factory
 from .panels import add_panel_bundle_label, add_panel_label, add_panel_suptitle, add_scale_bar
 from .style import (
     NATURE_STYLE,
@@ -42,6 +47,7 @@ from .style import (
     standalone_figure_size,
     truncate_colormap,
 )
+from .waves import draw_wave_bootstrap_panel, draw_wave_timing_panel
 
 __all__ = [
     "ComposedFigure",
@@ -62,13 +68,20 @@ __all__ = [
     "apply_paper_style",
     "compose_figure",
     "draw_cofiring_heatmap",
+    "draw_activity_state_ifr_kde_histograms",
+    "draw_electrode_peak_time_map",
+    "draw_high_activity_burst_windows",
     "draw_ifr_timeseries_panel",
     "draw_grid_avghz",
+    "draw_grid_avghz_panel",
     "draw_population_ifr_summary",
+    "draw_wave_bootstrap_panel",
+    "draw_wave_timing_panel",
     "export_figure",
     "figure",
     "figure_mode_defaults",
     "group",
+    "grid_avghz_panel_axes_factory",
     "ifr_timeseries_axes_factory",
     "layout_preset",
     "make_figure_grid",
@@ -82,6 +95,7 @@ __all__ = [
     "plot_binned_distance_series",
     "plot_aligned_electrode_heatmap",
     "plot_activity_state_ifr_kde_histograms",
+    "plot_electrode_peak_time_map",
     "plot_high_activity_burst_windows",
     "plot_macro_burst_detector_comparison_windows",
     "plot_ifr_histogram",
@@ -92,5 +106,6 @@ __all__ = [
     "plot_population_ifr_summary",
     "population_ifr_summary_axes_factory",
     "save_average_hex_gif",
+    "select_high_activity_windows",
     "truncate_colormap",
 ]

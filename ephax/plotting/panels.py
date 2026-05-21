@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.transforms import Bbox
 
@@ -51,9 +50,7 @@ def add_panel_bundle_label(
     if not flat_axes:
         return None
     fig = flat_axes[0].figure
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
-    bbox = _axes_bundle_bbox(flat_axes, renderer, extra_artists=extra_artists)
+    bbox = _axes_bundle_bbox(flat_axes, extra_artists=extra_artists)
     display_label = label.lower() if lowercase and len(label) == 1 and label.isalpha() else label
     x = max(bbox.x0 - float(x_pad), 0.012)
     defaults = {
@@ -74,6 +71,7 @@ def add_panel_suptitle(
     title: str | None,
     *,
     y_pad: float = 0.018,
+    child_title_pad: float = 0.095,
     fontsize: float | None = None,
     fontweight: str = "normal",
     **kwargs,
@@ -85,9 +83,8 @@ def add_panel_suptitle(
     if not flat_axes:
         return None
     fig = flat_axes[0].figure
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
-    bbox = _axes_bundle_bbox(flat_axes, renderer)
+    bbox = _axes_bundle_bbox(flat_axes)
+    title_clearance = float(child_title_pad) if any(ax.get_title() for ax in flat_axes) else 0.0
     defaults = {
         "ha": "center",
         "va": "bottom",
@@ -95,7 +92,7 @@ def add_panel_suptitle(
         "fontweight": fontweight,
     }
     defaults.update(kwargs)
-    text = fig.text((bbox.x0 + bbox.x1) / 2.0, bbox.y1 + float(y_pad), title, **defaults)
+    text = fig.text((bbox.x0 + bbox.x1) / 2.0, bbox.y1 + float(y_pad) + title_clearance, title, **defaults)
     text.set_in_layout(False)
     return text
 
@@ -171,18 +168,22 @@ def _flatten_axes(axes):
             yield from _flatten_axes(value)
 
 
-def _axes_bundle_bbox(axes, renderer, *, extra_artists=None):
-    """Return a figure-coordinate bbox that includes axes titles and labels."""
-    fig = axes[0].figure
+def _axes_bundle_bbox(axes, *, extra_artists=None):
+    """Return a figure-coordinate bbox for an axes bundle without forcing a draw.
+
+    These helpers are called while composed figures are still being built. Calling
+    ``fig.canvas.draw()`` here can invoke Matplotlib's constrained-layout solver
+    before all artists are stable, producing transient collapsed-axes warnings.
+    Axes positions are already in figure coordinates and are enough for placing
+    external panel labels and suptitles.
+    """
     bboxes = []
     for ax in axes:
-        tight = ax.get_tightbbox(renderer)
-        if tight is None:
-            bboxes.append(ax.get_position())
-        else:
-            bboxes.append(tight.transformed(fig.transFigure.inverted()))
+        bboxes.append(ax.get_position())
     for artist in extra_artists or []:
         if artist is None:
             continue
-        bboxes.append(artist.get_window_extent(renderer).transformed(fig.transFigure.inverted()))
+        if hasattr(artist, "get_position"):
+            x, y = artist.get_position()
+            bboxes.append(Bbox.from_extents(float(x), float(y), float(x), float(y)))
     return Bbox.union(bboxes)

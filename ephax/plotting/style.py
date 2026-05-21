@@ -14,14 +14,19 @@ class NatureFigureStyle:
     """Nature-branded research figure defaults in final-size points/mm."""
 
     font_family: tuple[str, ...] = ("Arial", "Helvetica", "DejaVu Sans")
-    font_size: float = 6.0
+    font_size: float = 5.0
     min_font_size: float = 5.0
     max_font_size: float = 7.0
-    panel_label_size: float = 8.0
-    axes_linewidth: float = 0.5
-    tick_linewidth: float = 0.5
-    data_linewidth: float = 0.75
-    emphasis_linewidth: float = 1.0
+    panel_label_size: float = 7.0
+    axes_linewidth: float = 0.4
+    tick_linewidth: float = 0.4
+    major_tick_size: float = 1.2
+    minor_tick_size: float = 0.8
+    tick_pad: float = 0.5
+    axes_labelpad: float = 1.0
+    axes_titlepad: float = 2.0
+    data_linewidth: float = 0.4
+    emphasis_linewidth: float = 0.6
     inline_dpi: int = 160
     image_dpi: int = 450
     bitmap_min_dpi: int = 300
@@ -35,7 +40,7 @@ FONT_SIZES = {
     "small": 5.0,
     "base": NATURE_STYLE.font_size,
     "label": NATURE_STYLE.font_size,
-    "title": NATURE_STYLE.max_font_size,
+    "title": 5.5,
     "panel_label": NATURE_STYLE.panel_label_size,
 }
 LINE_WIDTHS = {
@@ -209,11 +214,21 @@ def apply_nature_style():
         "xtick.labelsize": FONT_SIZES["small"],
         "ytick.labelsize": FONT_SIZES["small"],
         "legend.fontsize": FONT_SIZES["small"],
+        "axes.labelpad": NATURE_STYLE.axes_labelpad,
+        "axes.titlepad": NATURE_STYLE.axes_titlepad,
         "axes.linewidth": LINE_WIDTHS["thin"],
         "xtick.major.width": NATURE_STYLE.tick_linewidth,
         "ytick.major.width": NATURE_STYLE.tick_linewidth,
         "xtick.minor.width": NATURE_STYLE.tick_linewidth,
         "ytick.minor.width": NATURE_STYLE.tick_linewidth,
+        "xtick.major.size": NATURE_STYLE.major_tick_size,
+        "ytick.major.size": NATURE_STYLE.major_tick_size,
+        "xtick.minor.size": NATURE_STYLE.minor_tick_size,
+        "ytick.minor.size": NATURE_STYLE.minor_tick_size,
+        "xtick.major.pad": NATURE_STYLE.tick_pad,
+        "ytick.major.pad": NATURE_STYLE.tick_pad,
+        "xtick.minor.pad": NATURE_STYLE.tick_pad,
+        "ytick.minor.pad": NATURE_STYLE.tick_pad,
         "lines.linewidth": LINE_WIDTHS["base"],
         "axes.grid": False,
         "figure.dpi": NATURE_STYLE.inline_dpi,

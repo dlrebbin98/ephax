@@ -24,7 +24,7 @@ from ephax.plotting.ifr import (
     plot_ifr_timeseries,
     plot_ifr_timeseries_panel,
 )
-from ephax.plotting.layout_grid import draw_grid_avghz
+from ephax.plotting.layout_grid import draw_grid_avghz, draw_grid_avghz_panel, grid_avghz_panel_axes_factory
 from ephax.plotting.layout import FigureSpec, PanelSpec, add_panel_axes, make_figure_grid
 from ephax.plotting.panels import add_panel_bundle_label, add_panel_label, add_panel_suptitle
 from ephax.plotting.style import (
@@ -218,6 +218,15 @@ def test_draw_cofiring_heatmap_uses_provided_axes():
     plt.close(fig)
 
 
+def test_draw_cofiring_heatmap_accepts_title_override_in_compact_mode():
+    fig, ax = plt.subplots(figsize=(4, 3))
+
+    draw_cofiring_heatmap(fixture_cofiring_heatmap(), ax, title="custom cofiring", show_colorbar=False, compact=True)
+
+    assert ax.get_title() == "custom cofiring"
+    plt.close(fig)
+
+
 def test_draw_grid_avghz_uses_provided_axes():
     fig, ax = plt.subplots(figsize=(3, 2))
 
@@ -227,6 +236,24 @@ def test_draw_grid_avghz_uses_provided_axes():
     assert rendered["colorbar"] is None
     assert ax.get_title() == "empirical"
     assert ax.get_facecolor() == (0.0, 0.0, 0.0, 1.0)
+    plt.close(fig)
+
+
+def test_draw_grid_avghz_panel_uses_provided_axes():
+    fig = plt.figure(figsize=(6, 3), constrained_layout=True)
+    axes = grid_avghz_panel_axes_factory(fig, fig.add_gridspec(1, 1)[0, 0], n_items=2, ncols=2)
+
+    rendered = draw_grid_avghz_panel(
+        [fixture_grid_result(), fixture_grid_result()],
+        axes,
+        recording_titles=["well 0", "well 1"],
+        compact=True,
+    )
+
+    assert rendered["mappable"] is not None
+    assert rendered["colorbar"] is not None
+    assert axes[0].reshape(-1)[0].get_title() == "well 0"
+    assert axes[0].reshape(-1)[1].get_facecolor() == (0.0, 0.0, 0.0, 1.0)
     plt.close(fig)
 
 
@@ -246,6 +273,25 @@ def test_draw_population_ifr_summary_uses_provided_axes():
 
     assert rendered["heatmap"] is not None
     assert axes[1].get_ylabel() == "Hz"
+    assert axes[0].get_title() == ""
+    plt.close(fig)
+
+
+def test_draw_population_ifr_summary_can_show_titles_in_compact_mode():
+    fig = plt.figure(figsize=(6, 4), constrained_layout=True)
+    axes = population_ifr_summary_axes_factory(fig, fig.add_gridspec(1, 1)[0, 0])
+
+    draw_population_ifr_summary(
+        fixture_population_ifr(),
+        axes,
+        compact=True,
+        show_titles=True,
+        heatmap_title="heatmap override",
+        mean_title="mean override",
+    )
+
+    assert axes[0].get_title() == "heatmap override"
+    assert axes[1].get_title() == "mean override"
     plt.close(fig)
 
 
@@ -474,6 +520,28 @@ def test_simple_figure_panel_group_api_matches_composition_behavior():
     plt.close(composed.fig)
 
 
+def test_panel_title_is_forwarded_as_default_draw_option():
+    def draw_line(_data, ax, **opts):
+        ax.plot([0, 1], [0, 1])
+        if opts.get("title"):
+            ax.set_title(opts["title"])
+        return {"axes": ax}
+
+    composed = compose_figure(
+        figure(width=4, height=3),
+        [
+            panel(
+                "line",
+                title="forwarded title",
+                draw=draw_line,
+            )
+        ],
+    )
+
+    assert composed.axes["line"].get_title() == "forwarded title"
+    plt.close(composed.fig)
+
+
 def test_compose_figure_adds_panel_suptitles():
     def draw_line(_data, ax, **_opts):
         ax.plot([0, 1], [0, 1])
@@ -503,9 +571,38 @@ def test_compose_figure_adds_panel_suptitles():
         ],
     )
 
-    figure_text = [text.get_text() for text in composed.fig.texts]
-    assert "Nested panel title" in figure_text
-    assert "Grouped panel title" in figure_text
+    axes_text = [text.get_text() for ax in composed.fig.axes for text in ax.texts]
+    assert "Nested panel title" in axes_text
+    assert "Grouped panel title" in axes_text
+    assert "a" in axes_text
+    assert "b" in axes_text
+    plt.close(composed.fig)
+
+
+def test_compose_figure_labels_numpy_axes_bundle_without_suptitle():
+    def axes_factory(fig, subplotspec):
+        gs = subplotspec.subgridspec(2, 1)
+        return np.asarray([fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[1, 0])], dtype=object)
+
+    def draw_lines(_data, axes, **_opts):
+        for ax in axes:
+            ax.plot([0, 1], [0, 1])
+        return {"axes": axes}
+
+    composed = compose_figure(
+        figure(width=4, height=3),
+        [
+            panel(
+                "array_bundle",
+                label="d",
+                draw=draw_lines,
+                axes_factory=axes_factory,
+            )
+        ],
+    )
+
+    axes_text = [text.get_text() for ax in composed.fig.axes for text in ax.texts]
+    assert "d" in axes_text
     plt.close(composed.fig)
 
 

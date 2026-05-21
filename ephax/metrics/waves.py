@@ -1,10 +1,280 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter1d
 
 from ..models import AlignedBurstEvents, WaveAnalysisResult
+from .burst import (
+    align_highres_to_anchors,
+    assign_max_population_ifr_burst_anchors,
+    build_highres_traces,
+    build_participation_activity_state,
+    build_population_ifr,
+    detect_high_activity_epochs,
+    detect_participation_burst_epochs,
+)
+
+
+def wave_cache_key(
+    *,
+    x_bin_um: float = 300.0,
+    peak_search_start_ms: float = -15.0,
+    peak_search_stop_ms: float = 20.0,
+    trace_smooth_sigma_ms: float = 2.0,
+    bin_ms: float = 1.0,
+    min_electrodes_per_bin: int = 5,
+    min_events_per_bin: int = 5,
+    bootstrap_reps: int = 2000,
+    random_seed: int = 0,
+) -> str:
+    """Return a stable cache key for eventwise wave-analysis settings."""
+    return (
+        f"xbin{float(x_bin_um):g}_"
+        f"peak{float(peak_search_start_ms):g}to{float(peak_search_stop_ms):g}_"
+        f"smooth{float(trace_smooth_sigma_ms):g}_"
+        f"bin{float(bin_ms):g}_"
+        f"minelec{int(min_electrodes_per_bin)}_"
+        f"minevents{int(min_events_per_bin)}_"
+        f"boot{int(bootstrap_reps)}_seed{int(random_seed)}"
+    ).replace(".", "p").replace("-", "m")
+
+
+def wave_cache_dir(root: str | Path, recording_id: str, **settings) -> Path:
+    """Return the cache directory for one recording and wave-analysis settings."""
+    return Path(root) / str(recording_id) / wave_cache_key(**settings)
+
+
+def save_wave_result_cache(result: WaveAnalysisResult, cache_dir: str | Path) -> Path:
+    """Write a WaveAnalysisResult to a directory of CSV cache files."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    result.event_direction.to_csv(cache_dir / "event_direction.csv", index=False)
+    result.trace.to_csv(cache_dir / "trace.csv", index=False)
+    result.peaks.to_csv(cache_dir / "peaks.csv", index=False)
+    result.bin_summary.to_csv(cache_dir / "bin_summary.csv", index=False)
+    result.fit_summary.to_csv(cache_dir / "fit_summary.csv", index=False)
+    pd.DataFrame(result.heatmap).to_csv(cache_dir / "heatmap.csv", index=True, index_label="time_ms")
+    pd.DataFrame({"speed_um_per_ms": result.bootstrap_speeds}).to_csv(cache_dir / "bootstrap_speeds.csv", index=False)
+    return cache_dir
+
+
+def load_wave_result_cache(cache_dir: str | Path) -> WaveAnalysisResult | None:
+    """Load a WaveAnalysisResult from a CSV cache directory if all files exist."""
+    cache_dir = Path(cache_dir)
+    required = [
+        "event_direction.csv",
+        "trace.csv",
+        "peaks.csv",
+        "bin_summary.csv",
+        "fit_summary.csv",
+        "heatmap.csv",
+        "bootstrap_speeds.csv",
+    ]
+    if not all((cache_dir / name).exists() for name in required):
+        return None
+    heatmap = pd.read_csv(cache_dir / "heatmap.csv", index_col=0)
+    heatmap.index = heatmap.index.astype(float)
+    heatmap.columns = heatmap.columns.astype(float)
+    boot_df = pd.read_csv(cache_dir / "bootstrap_speeds.csv")
+    bootstrap_speeds = boot_df["speed_um_per_ms"].to_numpy(dtype=float)
+    fit_summary = pd.read_csv(cache_dir / "fit_summary.csv")
+    if "bootstrap_speed_mean_um_per_ms" not in fit_summary.columns:
+        fit_summary["bootstrap_speed_mean_um_per_ms"] = float(np.mean(bootstrap_speeds)) if bootstrap_speeds.size else np.nan
+    return WaveAnalysisResult(
+        event_direction=pd.read_csv(cache_dir / "event_direction.csv"),
+        trace=pd.read_csv(cache_dir / "trace.csv"),
+        peaks=pd.read_csv(cache_dir / "peaks.csv"),
+        bin_summary=pd.read_csv(cache_dir / "bin_summary.csv"),
+        fit_summary=fit_summary,
+        heatmap=heatmap,
+        bootstrap_speeds=bootstrap_speeds,
+    )
+
+
+def compute_or_load_wave_result(
+    recording_id: str,
+    aligned: AlignedBurstEvents,
+    layout: dict | pd.DataFrame,
+    *,
+    cache_root: str | Path | None = None,
+    force: bool = False,
+    x_bin_um: float = 300.0,
+    peak_search_start_ms: float = -15.0,
+    peak_search_stop_ms: float = 20.0,
+    trace_smooth_sigma_ms: float = 2.0,
+    bin_ms: float = 1.0,
+    min_electrodes_per_bin: int = 5,
+    min_events_per_bin: int = 5,
+    bootstrap_reps: int = 2000,
+    random_seed: int = 0,
+) -> WaveAnalysisResult:
+    """Compute or load one eventwise wave-analysis result."""
+    settings = {
+        "x_bin_um": x_bin_um,
+        "peak_search_start_ms": peak_search_start_ms,
+        "peak_search_stop_ms": peak_search_stop_ms,
+        "trace_smooth_sigma_ms": trace_smooth_sigma_ms,
+        "bin_ms": bin_ms,
+        "min_electrodes_per_bin": min_electrodes_per_bin,
+        "min_events_per_bin": min_events_per_bin,
+        "bootstrap_reps": bootstrap_reps,
+        "random_seed": random_seed,
+    }
+    cache_dir = wave_cache_dir(cache_root, recording_id, **settings) if cache_root is not None else None
+    if cache_dir is not None and not force:
+        cached = load_wave_result_cache(cache_dir)
+        if cached is not None:
+            return cached
+
+    result = analyze_eventwise_waves(aligned, layout, **settings)
+    if cache_dir is not None:
+        save_wave_result_cache(result, cache_dir)
+    return result
+
+
+def build_burst_peak_aligned_events(
+    recording,
+    selected_refs,
+    *,
+    ifr_grid_hz: float = 50.0,
+    smooth_sigma_sec: float = 0.15,
+    highres_bin_ms: float = 1.0,
+    highres_smooth_sigma_ms: float = 3.0,
+    network_bin_ms: float = 10.0,
+    high_activity_mad_scale: float = 3.0,
+    high_activity_min_duration_ms: float = 30.0,
+    high_activity_max_gap_bins: int = 0,
+    network_min_participation_fraction: float = 0.05,
+    network_min_duration_ms: float = 20.0,
+    align_pre_ms: float = 20.0,
+    align_post_ms: float = 40.0,
+) -> tuple[AlignedBurstEvents, dict[str, object]]:
+    """Build burst-peak-centered aligned events for wave analysis."""
+    population = build_population_ifr(recording, selected_refs, grid_hz=ifr_grid_hz, smooth_sigma_sec=smooth_sigma_sec)
+    highres = build_highres_traces(
+        recording,
+        selected_refs,
+        bin_ms=highres_bin_ms,
+        smooth_sigma_ms=highres_smooth_sigma_ms,
+    )
+    high_epochs, high_info = detect_high_activity_epochs(
+        population.time_grid,
+        population.mean_ifr_smooth,
+        mad_scale=high_activity_mad_scale,
+        min_duration_ms=high_activity_min_duration_ms,
+        max_gap_bins=high_activity_max_gap_bins,
+    )
+    participation = build_participation_activity_state(highres, aggregation_ms=network_bin_ms)
+    burst_epochs = detect_participation_burst_epochs(
+        participation,
+        high_epochs,
+        min_participation_fraction=network_min_participation_fraction,
+        min_duration_ms=network_min_duration_ms,
+    )
+    burst_epochs = assign_max_population_ifr_burst_anchors(highres, burst_epochs)
+    anchors = burst_epochs.copy()
+    if not anchors.empty:
+        anchors["coarse_event_idx"] = anchors["event_idx"].astype(int)
+        anchors["gamma_peak_rank"] = 0
+        anchors["onset_time_s"] = anchors["start_time_s"].astype(float)
+        anchors["anchor_height_hz"] = anchors["anchor_population_rate_hz"].astype(float)
+        anchors["gamma_anchor_delay_ms"] = (anchors["anchor_time_s"] - anchors["onset_time_s"]) * 1000.0
+        anchors["anchor_type"] = "max_highres_population_ifr"
+    aligned = align_highres_to_anchors(
+        highres,
+        anchors,
+        pre_ms=align_pre_ms,
+        post_ms=align_post_ms,
+        bin_ms=highres_bin_ms,
+    )
+    return aligned, {
+        "population": population,
+        "highres": highres,
+        "high_activity_epochs": high_epochs,
+        "high_activity_info": high_info,
+        "participation_activity": participation,
+        "burst_epochs": burst_epochs,
+    }
+
+
+def aggregate_wave_results(
+    results_by_recording: list[tuple[str, WaveAnalysisResult]],
+    *,
+    x_bin_um: float = 300.0,
+    min_events_per_bin: int = 5,
+    bootstrap_reps: int = 2000,
+    random_seed: int = 0,
+) -> tuple[WaveAnalysisResult, pd.DataFrame]:
+    """Pool eventwise wave results across recordings and refit aggregate speed."""
+    if not results_by_recording:
+        raise ValueError("No wave results were provided for aggregation.")
+
+    peak_frames = []
+    trace_frames = []
+    direction_frames = []
+    fit_frames = []
+    event_offset = 0
+    for recording_id, result in results_by_recording:
+        peaks = result.peaks.copy()
+        trace = result.trace.copy()
+        directions = result.event_direction.copy()
+        fit = result.fit_summary.copy()
+
+        for df in (peaks, trace, directions):
+            df["recording_id"] = str(recording_id)
+            if "window_idx" in df:
+                df["local_window_idx"] = df["window_idx"].astype(int)
+                df["window_idx"] = df["local_window_idx"] + int(event_offset)
+        fit["recording_id"] = str(recording_id)
+
+        peak_frames.append(peaks)
+        trace_frames.append(trace)
+        direction_frames.append(directions)
+        fit_frames.append(fit)
+        event_offset += int(result.peaks["window_idx"].nunique())
+
+    combined_peaks = pd.concat(peak_frames, ignore_index=True)
+    combined_trace = pd.concat(trace_frames, ignore_index=True)
+    combined_directions = pd.concat(direction_frames, ignore_index=True)
+    per_recording_fit = pd.concat(fit_frames, ignore_index=True)
+
+    combined_bin_summary = summarize_wave_peaks(combined_peaks, min_events_per_bin=min_events_per_bin)
+    if len(combined_bin_summary) < 3:
+        raise ValueError("Too few aggregate x-bins survived the minimum-event filter for wave fitting.")
+    aggregate_array_width_um = float(per_recording_fit["array_width_um"].median())
+    combined_fit_summary, combined_boot_speeds = fit_wave_speed(
+        combined_peaks,
+        combined_bin_summary,
+        x_bin_um=x_bin_um,
+        array_width_um=aggregate_array_width_um,
+        event_direction=combined_directions,
+        bootstrap_reps=bootstrap_reps,
+        min_events_per_bin=min_events_per_bin,
+        random_seed=random_seed,
+    )
+    combined_heatmap = (
+        combined_trace.groupby(["time_ms", "origin_x_um"], as_index=False)["rate_hz"]
+        .mean()
+        .sort_values(["time_ms", "origin_x_um"])
+        .pivot(index="time_ms", columns="origin_x_um", values="rate_hz")
+        .sort_index()
+        .sort_index(axis=1)
+    )
+    return (
+        WaveAnalysisResult(
+            event_direction=combined_directions,
+            trace=combined_trace,
+            peaks=combined_peaks,
+            bin_summary=combined_bin_summary,
+            fit_summary=combined_fit_summary,
+            heatmap=combined_heatmap,
+            bootstrap_speeds=combined_boot_speeds,
+        ),
+        per_recording_fit,
+    )
 
 
 def analyze_eventwise_waves(
