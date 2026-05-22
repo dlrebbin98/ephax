@@ -221,7 +221,7 @@ def draw_activity_state_ifr_kde_histograms(
             color=state_colors.get(state, "0.5"),
             lw=LINE_WIDTHS["emphasis"],
         )
-        peaks = ax.scatter(hist["peak_hz"], hist["peak_counts"], color="crimson", s=18 if compact else 28, zorder=3, label="Binned-KDE maxima")
+        peaks = ax.scatter(hist["peak_hz"], hist["peak_counts"], color="crimson", s=10 if compact else 20, zorder=3, label="Binned-KDE maxima")
         if max_peak_labels:
             for peak_hz, peak_counts in zip(hist["peak_hz"][: int(max_peak_labels)], hist["peak_counts"][: int(max_peak_labels)]):
                 ax.text(
@@ -264,10 +264,12 @@ def plot_electrode_peak_time_map(
     cmap: str = "coolwarm",
     vmin: float | None = None,
     vmax: float | None = None,
+    render_mode: str = "scatter",
+    gridsize: int = 35,
     figsize: str | tuple[float, float] = "medium_single",
     mode="standalone",
 ):
-    """Plot an unbinned HD-MEA map colored by electrode peak-time latency."""
+    """Plot an HD-MEA map colored by electrode peak-time latency."""
     defaults = figure_mode_defaults(mode)
     fig, ax = plt.subplots(figsize=resolve_figure_size(figsize), constrained_layout=True)
     draw_electrode_peak_time_map(
@@ -277,6 +279,8 @@ def plot_electrode_peak_time_map(
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
+        render_mode=render_mode,
+        gridsize=gridsize,
         compact=defaults.compact,
         show_colorbar=defaults.show_colorbar,
     )
@@ -297,8 +301,10 @@ def draw_electrode_peak_time_map(
     ylim: tuple[float, float] | None = None,
     marker_size: float | None = None,
     show_invalid: bool = True,
+    render_mode: str = "scatter",
+    gridsize: int = 35,
 ):
-    """Draw an unbinned HD-MEA map colored by electrode peak-time latency."""
+    """Draw an HD-MEA map colored by electrode peak-time latency."""
     required = {"x", "y", "peak_time_ms", "valid"}
     missing = required.difference(peak_map.columns)
     if missing:
@@ -315,9 +321,13 @@ def draw_electrode_peak_time_map(
         vmin = -limit if vmin is None else float(vmin)
         vmax = limit if vmax is None else float(vmax)
 
+    render_mode = str(render_mode).lower()
+    if render_mode not in {"scatter", "hexbin"}:
+        raise ValueError("render_mode must be 'scatter' or 'hexbin'.")
     size = float(marker_size if marker_size is not None else (6.0 if compact else 10.0))
+    norm = Normalize(vmin=float(vmin), vmax=float(vmax))
     ax.set_facecolor("black")
-    if show_invalid and np.any(~valid):
+    if render_mode == "scatter" and show_invalid and np.any(~valid):
         ax.scatter(
             plot_df.loc[~valid, "x"],
             plot_df.loc[~valid, "y"],
@@ -326,16 +336,31 @@ def draw_electrode_peak_time_map(
             edgecolors="none",
             alpha=0.45,
         )
-    scatter = ax.scatter(
-        plot_df.loc[valid, "x"],
-        plot_df.loc[valid, "y"],
-        c=plot_df.loc[valid, "peak_time_ms"],
-        s=size,
-        cmap=cmap,
-        norm=Normalize(vmin=float(vmin), vmax=float(vmax)),
-        edgecolors="none",
-        alpha=0.95,
-    )
+    if render_mode == "hexbin":
+        mappable = ax.hexbin(
+            plot_df.loc[valid, "x"],
+            plot_df.loc[valid, "y"],
+            C=plot_df.loc[valid, "peak_time_ms"],
+            reduce_C_function=np.mean,
+            gridsize=int(gridsize),
+            cmap=cmap,
+            mincnt=1,
+            linewidths=0.35,
+            edgecolors="black",
+            norm=norm,
+            extent=(*xlim, *ylim) if xlim is not None and ylim is not None else None,
+        )
+    else:
+        mappable = ax.scatter(
+            plot_df.loc[valid, "x"],
+            plot_df.loc[valid, "y"],
+            c=plot_df.loc[valid, "peak_time_ms"],
+            s=size,
+            cmap=cmap,
+            norm=norm,
+            edgecolors="none",
+            alpha=0.95,
+        )
     ax.set_aspect("equal", adjustable="box")
     ax.grid(False)
     if xlim is not None:
@@ -355,14 +380,16 @@ def draw_electrode_peak_time_map(
 
     colorbar = None
     if show_colorbar is not False:
-        colorbar = ax.figure.colorbar(scatter, ax=ax)
-        colorbar.set_label("Electrode peak time relative to gamma anchor (ms)")
+        colorbar = ax.figure.colorbar(mappable, ax=ax)
+        colorbar.set_label("Peak time relative to event peak (ms)")
     return {
         "axes": ax,
-        "scatter": scatter,
-        "mappable": scatter,
+        "artist": mappable,
+        "scatter": mappable,
+        "mappable": mappable,
         "colorbar": colorbar,
-        "colorbar_label": "Electrode peak time relative to gamma anchor (ms)",
+        "render_mode": render_mode,
+        "colorbar_label": "Peak time relative to event peak (ms)",
     }
 
 

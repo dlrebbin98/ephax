@@ -170,6 +170,27 @@ def test_draw_electrode_peak_time_map_renders_supplied_axis():
     plt.close(fig2)
 
 
+def test_draw_electrode_peak_time_map_supports_hexbin_mode():
+    aligned, layout = fixture_aligned_peak_map_events()
+    peak_map = compute_electrode_peak_time_map(aligned, layout, window_idx=1)
+    fig, ax = plt.subplots(figsize=(4, 2))
+
+    rendered = draw_electrode_peak_time_map(
+        peak_map,
+        ax,
+        render_mode="hexbin",
+        gridsize=8,
+        xlim=(0.0, 250.0),
+        ylim=(0.0, 80.0),
+        show_colorbar=False,
+    )
+
+    assert rendered["render_mode"] == "hexbin"
+    assert rendered["mappable"].get_array().size > 0
+    assert rendered["colorbar"] is None
+    plt.close(fig)
+
+
 def test_burst_metrics_extract_notebook_core_path():
     ds = fixture_burst_dataset()
     rec = ds.recordings[0]
