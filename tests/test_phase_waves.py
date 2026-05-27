@@ -10,15 +10,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from phase_waves import (
     SPATIAL_CLASS,
+    WAVE_MODEL_CLASS,
+    classify_wave_model,
     classify_spatial_aperture,
     compute_phase_velocity,
     demodulated_window_phasor,
     estimate_omega,
     extract_phasors,
+    fit_k_radial_phasor,
     fit_k_phasor_plane,
     inspect_file,
     load_chunk,
     make_k_grid,
+    make_radial_grid,
     process_file,
 )
 
@@ -35,6 +39,31 @@ def test_fit_k_phasor_plane_recovers_synthetic_wave_vector():
 
     assert fit["R_fit"] > 0.99
     np.testing.assert_allclose([fit["kx"], fit["ky"]], true_k, atol=0.08)
+
+
+def test_fit_k_radial_phasor_recovers_synthetic_source_and_wavenumber():
+    x, y = np.meshgrid(np.linspace(0.0, 3.0, 12), np.linspace(0.0, 2.0, 9))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    true_center = np.array([1.0, 0.8])
+    true_k = 2.0 * np.pi / 1.4
+    distances = np.linalg.norm(coords - true_center[None, :], axis=1)
+    ubar = np.exp(1j * true_k * distances)
+    weights = np.ones(coords.shape[0])
+    radial_grid = make_radial_grid(
+        coords,
+        center_grid_n=13,
+        center_margin_mm=0.0,
+        lambda_min_mm=1.0,
+        lambda_max_mm=2.0,
+        k_grid_n=31,
+    )
+
+    fit = fit_k_radial_phasor(ubar, weights, coords, radial_grid, refine=True)
+
+    assert fit["R_radial"] > 0.98
+    np.testing.assert_allclose([fit["radial_x0_mm"], fit["radial_y0_mm"]], true_center, atol=0.12)
+    np.testing.assert_allclose(fit["radial_k"], true_k, atol=0.15)
+    assert fit["radial_sign"] == 1
 
 
 def test_extract_phasors_handles_zero_amplitude_channels():
@@ -103,6 +132,41 @@ def test_compute_phase_velocity_uses_constant_phase_direction():
     np.testing.assert_allclose(reversed_velocity["v_phi_mm_per_s"], -5.0)
     np.testing.assert_allclose(reversed_velocity["phase_speed_mm_per_s"], 5.0)
     np.testing.assert_allclose(reversed_velocity["velocity_x_mm_per_s"], 5.0)
+
+
+def test_classify_wave_model_compares_planar_and_radial_support():
+    assert (
+        classify_wave_model(
+            planar_valid=True,
+            radial_valid=True,
+            spatial_class=SPATIAL_CLASS["resolvable_wave"],
+            radial_cycles_across_array=1.0,
+            delta_r=0.08,
+            delta_r_min=0.05,
+        )
+        == WAVE_MODEL_CLASS["radial_like"]
+    )
+    assert (
+        classify_wave_model(
+            planar_valid=True,
+            radial_valid=True,
+            spatial_class=SPATIAL_CLASS["resolvable_wave"],
+            radial_cycles_across_array=1.0,
+            delta_r=-0.08,
+            delta_r_min=0.05,
+        )
+        == WAVE_MODEL_CLASS["planar_like"]
+    )
+    assert (
+        classify_wave_model(
+            planar_valid=False,
+            radial_valid=False,
+            spatial_class=SPATIAL_CLASS["near_sync"],
+            radial_cycles_across_array=0.1,
+            delta_r=np.nan,
+        )
+        == WAVE_MODEL_CLASS["near_sync"]
+    )
 
 
 def _write_synthetic_maxtwo(path):
@@ -223,20 +287,27 @@ def test_process_file_streams_hdf5_windows(tmp_path):
         start_s=0.0,
         stop_s=1.0,
         max_channels_per_block=3,
+        fit_radial=True,
+        radial_center_grid_n=5,
+        radial_center_margin_mm=0.0,
     )
 
     with h5py.File(out, "r") as h5:
         group = h5["phase_waves"]
         n = group["t_center_s"].shape[0]
         assert n > 2
-        for name in ("kx", "ky", "k_norm", "lambda_mm", "direction_x", "direction_y", "direction_rad", "aperture_along_k_mm", "phase_span_rad", "cycles_across_array", "spatial_class", "propagation_valid", "omega", "v_phi_mm_per_s", "phase_speed_mm_per_s", "phase_speed_peak_mm_per_s", "velocity_x_mm_per_s", "velocity_y_mm_per_s", "velocity_direction_rad", "R_fit", "valid", "interval_idx"):
+        for name in ("kx", "ky", "k_norm", "lambda_mm", "direction_x", "direction_y", "direction_rad", "aperture_along_k_mm", "phase_span_rad", "cycles_across_array", "spatial_class", "propagation_valid", "omega", "v_phi_mm_per_s", "phase_speed_mm_per_s", "phase_speed_peak_mm_per_s", "velocity_x_mm_per_s", "velocity_y_mm_per_s", "velocity_direction_rad", "radial_x0_mm", "radial_y0_mm", "radial_k", "radial_lambda_mm", "radial_sign", "radial_aperture_mm", "radial_phase_span_rad", "radial_cycles_across_array", "R_radial", "delta_R_radial_minus_planar", "radial_phase_speed_mm_per_s", "wave_model_class", "radial_valid", "R_fit", "valid", "interval_idx"):
             assert group[name].shape == (n,)
         assert np.isfinite(group["R_fit"][:]).any()
         assert np.isfinite(group["phase_speed_mm_per_s"][:]).any()
         assert set(group["interval_idx"][:].tolist()) == {0}
         assert set(group["spatial_class"][:].tolist()).issubset(set(SPATIAL_CLASS.values()))
         assert set(group["propagation_valid"][:].tolist()).issubset({0, 1})
+        assert set(group["wave_model_class"][:].tolist()).issubset(set(WAVE_MODEL_CLASS.values()))
+        assert set(group["radial_valid"][:].tolist()).issubset({0, 1})
         assert "spatial_class_mapping" in group.attrs
+        assert "wave_model_class_mapping" in group.attrs
+        assert "radial_velocity_sign_convention" in group.attrs
         assert "velocity_sign_convention" in group.attrs
         assert "config" in group.attrs
 

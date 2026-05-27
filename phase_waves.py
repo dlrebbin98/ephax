@@ -34,6 +34,19 @@ RESULT_COLUMNS = (
     "velocity_x_mm_per_s",
     "velocity_y_mm_per_s",
     "velocity_direction_rad",
+    "radial_x0_mm",
+    "radial_y0_mm",
+    "radial_k",
+    "radial_lambda_mm",
+    "radial_sign",
+    "radial_aperture_mm",
+    "radial_phase_span_rad",
+    "radial_cycles_across_array",
+    "R_radial",
+    "delta_R_radial_minus_planar",
+    "radial_phase_speed_mm_per_s",
+    "wave_model_class",
+    "radial_valid",
     "R_fit",
     "mean_weight",
     "n_good",
@@ -46,6 +59,14 @@ SPATIAL_CLASS = {
     "near_sync": 1,
     "weak_gradient": 2,
     "resolvable_wave": 3,
+}
+
+WAVE_MODEL_CLASS = {
+    "invalid": 0,
+    "near_sync": 1,
+    "planar_like": 2,
+    "radial_like": 3,
+    "ambiguous": 4,
 }
 
 
@@ -258,6 +279,48 @@ def make_k_grid(lambda_min_mm: float, lambda_max_mm: float, n_grid: int = 41) ->
     return {"kx": axis, "ky": axis, "k_min": k_min, "k_max": k_max}
 
 
+def make_radial_grid(
+    coords_mm: np.ndarray,
+    *,
+    center_grid_n: int = 15,
+    center_margin_mm: float = 0.0,
+    lambda_min_mm: float = 0.5,
+    lambda_max_mm: float = 5.0,
+    k_grid_n: int = 41,
+) -> dict[str, np.ndarray | float]:
+    """Build candidate centers and positive radial wavenumbers for radial waves.
+
+    By default, candidate centers are constrained to the mapped HD-MEA footprint
+    bounding box. A positive ``center_margin_mm`` explicitly allows off-array
+    origins.
+    """
+    coords_mm = np.asarray(coords_mm, dtype=np.float64)
+    if coords_mm.ndim != 2 or coords_mm.shape[1] != 2:
+        raise ValueError("coords_mm must have shape (n_channels, 2)")
+    if not (0 < lambda_min_mm < lambda_max_mm):
+        raise ValueError("Require 0 < lambda_min_mm < lambda_max_mm")
+    finite = np.isfinite(coords_mm).all(axis=1)
+    if np.count_nonzero(finite) < 3:
+        centers = np.empty((0, 2), dtype=np.float64)
+    else:
+        valid_coords = coords_mm[finite]
+        margin = max(0.0, float(center_margin_mm))
+        x_axis = np.linspace(float(np.nanmin(valid_coords[:, 0]) - margin), float(np.nanmax(valid_coords[:, 0]) + margin), int(center_grid_n))
+        y_axis = np.linspace(float(np.nanmin(valid_coords[:, 1]) - margin), float(np.nanmax(valid_coords[:, 1]) + margin), int(center_grid_n))
+        xx, yy = np.meshgrid(x_axis, y_axis)
+        centers = np.column_stack((xx.ravel(), yy.ravel())).astype(np.float64, copy=False)
+    k_min = 2.0 * np.pi / float(lambda_max_mm)
+    k_max = 2.0 * np.pi / float(lambda_min_mm)
+    k_values = np.linspace(k_min, k_max, int(k_grid_n), dtype=np.float64)
+    return {
+        "centers": centers,
+        "k": k_values,
+        "k_min": k_min,
+        "k_max": k_max,
+        "center_margin_mm": float(center_margin_mm),
+    }
+
+
 def _objective_score(k: np.ndarray, ubar: np.ndarray, w: np.ndarray, coords: np.ndarray) -> float:
     phase = coords @ np.asarray(k, dtype=np.float64)
     return float(np.abs(np.sum(w * ubar * np.exp(-1j * phase))))
@@ -338,6 +401,120 @@ def fit_k_phasor_plane(
     }
 
 
+def _radial_objective_score(center: np.ndarray, k_abs: float, sign: float, ubar: np.ndarray, w: np.ndarray, coords: np.ndarray) -> float:
+    distances = np.linalg.norm(coords - np.asarray(center, dtype=np.float64)[None, :], axis=1)
+    phase = float(sign) * float(k_abs) * distances
+    return float(np.abs(np.sum(w * ubar * np.exp(-1j * phase))))
+
+
+def fit_k_radial_phasor(
+    ubar: np.ndarray,
+    w: np.ndarray,
+    coords: np.ndarray,
+    radial_grid: dict[str, np.ndarray | float],
+    *,
+    refine: bool = True,
+    min_weight: float = 1e-6,
+) -> dict[str, float]:
+    """Fit a source-centered radial phase wave by weighted circular alignment."""
+    ubar = np.asarray(ubar, dtype=np.complex128)
+    w = np.asarray(w, dtype=np.float64)
+    coords = np.asarray(coords, dtype=np.float64)
+    if coords.shape != (ubar.size, 2):
+        raise ValueError("coords must have shape (n_channels, 2)")
+
+    finite = np.isfinite(w) & (w > min_weight) & np.isfinite(ubar.real) & np.isfinite(ubar.imag)
+    finite &= np.isfinite(coords).all(axis=1)
+    if np.count_nonzero(finite) < 3:
+        return {
+            "radial_x0_mm": np.nan,
+            "radial_y0_mm": np.nan,
+            "radial_k": np.nan,
+            "radial_sign": 0,
+            "R_radial": np.nan,
+            "radial_n_good": int(np.count_nonzero(finite)),
+        }
+
+    ubar = ubar[finite]
+    w = w[finite]
+    coords = coords[finite]
+    w_sum = float(np.sum(w))
+    if w_sum <= 0:
+        return {
+            "radial_x0_mm": np.nan,
+            "radial_y0_mm": np.nan,
+            "radial_k": np.nan,
+            "radial_sign": 0,
+            "R_radial": np.nan,
+            "radial_n_good": int(w.size),
+        }
+
+    centers = np.asarray(radial_grid["centers"], dtype=np.float64)
+    k_values = np.asarray(radial_grid["k"], dtype=np.float64)
+    k_min = float(radial_grid.get("k_min", np.nanmin(k_values) if k_values.size else 0.0))
+    k_max = float(radial_grid.get("k_max", np.nanmax(k_values) if k_values.size else np.inf))
+    if centers.size == 0 or k_values.size == 0:
+        return {
+            "radial_x0_mm": np.nan,
+            "radial_y0_mm": np.nan,
+            "radial_k": np.nan,
+            "radial_sign": 0,
+            "R_radial": np.nan,
+            "radial_n_good": int(w.size),
+        }
+
+    best_score = -np.inf
+    best_center = np.array([np.nan, np.nan], dtype=np.float64)
+    best_k = np.nan
+    best_sign = 0
+    weighted_ubar = w * ubar
+    for center in centers:
+        distances = np.linalg.norm(coords - center[None, :], axis=1)
+        for k_abs in k_values:
+            phase = float(k_abs) * distances
+            for sign in (-1.0, 1.0):
+                score = float(np.abs(np.sum(weighted_ubar * np.exp(-1j * sign * phase))))
+                if score > best_score:
+                    best_score = score
+                    best_center = center.astype(np.float64, copy=True)
+                    best_k = float(k_abs)
+                    best_sign = int(sign)
+
+    if refine and np.all(np.isfinite(best_center)) and np.isfinite(best_k):
+        center_min = np.nanmin(centers, axis=0)
+        center_max = np.nanmax(centers, axis=0)
+
+        def neg_score(params: np.ndarray) -> float:
+            center = np.asarray(params[:2], dtype=np.float64)
+            k_abs = float(params[2])
+            if k_abs < k_min or k_abs > k_max:
+                return 1e9 + min(abs(k_abs - k_min), abs(k_abs - k_max)) * 1e6
+            center_penalty = np.sum(np.maximum(center_min - center, 0.0) ** 2 + np.maximum(center - center_max, 0.0) ** 2)
+            return -_radial_objective_score(center, k_abs, best_sign, ubar, w, coords) + float(center_penalty) * 1e6
+
+        initial = np.array([best_center[0], best_center[1], best_k], dtype=np.float64)
+        result = minimize(neg_score, initial, method="Nelder-Mead", options={"maxiter": 150, "xatol": 1e-5, "fatol": 1e-5})
+        if result.success or np.isfinite(result.fun):
+            candidate = np.asarray(result.x, dtype=np.float64)
+            candidate_center = candidate[:2]
+            candidate_k = float(candidate[2])
+            if k_min <= candidate_k <= k_max:
+                candidate_score = _radial_objective_score(candidate_center, candidate_k, best_sign, ubar, w, coords)
+                if candidate_score >= best_score:
+                    best_center = candidate_center
+                    best_k = candidate_k
+                    best_score = candidate_score
+
+    return {
+        "radial_x0_mm": float(best_center[0]),
+        "radial_y0_mm": float(best_center[1]),
+        "radial_k": float(best_k),
+        "radial_sign": int(best_sign),
+        "R_radial": float(best_score / w_sum),
+        "radial_n_good": int(w.size),
+    }
+
+
 def classify_spatial_aperture(
     kx: float,
     ky: float,
@@ -390,6 +567,60 @@ def classify_spatial_aperture(
     }
 
 
+def classify_radial_aperture(
+    radial_x0_mm: float,
+    radial_y0_mm: float,
+    radial_k: float,
+    coords_mm: np.ndarray,
+) -> dict[str, float]:
+    """Compute finite-aperture support for a radial wave fit."""
+    coords_mm = np.asarray(coords_mm, dtype=np.float64)
+    if (
+        coords_mm.ndim != 2
+        or coords_mm.shape[1] != 2
+        or coords_mm.shape[0] < 2
+        or not np.isfinite(radial_x0_mm)
+        or not np.isfinite(radial_y0_mm)
+        or not np.isfinite(radial_k)
+        or radial_k == 0
+    ):
+        return {"radial_aperture_mm": np.nan, "radial_phase_span_rad": np.nan, "radial_cycles_across_array": np.nan}
+    finite = np.isfinite(coords_mm).all(axis=1)
+    if np.count_nonzero(finite) < 2:
+        return {"radial_aperture_mm": np.nan, "radial_phase_span_rad": np.nan, "radial_cycles_across_array": np.nan}
+    center = np.array([float(radial_x0_mm), float(radial_y0_mm)], dtype=np.float64)
+    distances = np.linalg.norm(coords_mm[finite] - center[None, :], axis=1)
+    aperture = float(np.nanmax(distances) - np.nanmin(distances))
+    phase_span = float(abs(radial_k) * aperture)
+    cycles = float(phase_span / (2.0 * np.pi))
+    return {"radial_aperture_mm": aperture, "radial_phase_span_rad": phase_span, "radial_cycles_across_array": cycles}
+
+
+def classify_wave_model(
+    *,
+    planar_valid: bool,
+    radial_valid: bool,
+    spatial_class: int,
+    radial_cycles_across_array: float,
+    delta_r: float,
+    delta_r_min: float = 0.05,
+) -> int:
+    """Classify the best-supported wave model for a fitted window."""
+    if not planar_valid and not radial_valid:
+        if int(spatial_class) in {SPATIAL_CLASS["near_sync"], SPATIAL_CLASS["weak_gradient"]} or (
+            np.isfinite(radial_cycles_across_array) and radial_cycles_across_array < 0.5
+        ):
+            return WAVE_MODEL_CLASS["near_sync"]
+        return WAVE_MODEL_CLASS["invalid"]
+    if radial_valid and np.isfinite(delta_r) and delta_r >= float(delta_r_min):
+        return WAVE_MODEL_CLASS["radial_like"]
+    if planar_valid and ((np.isfinite(delta_r) and delta_r <= -float(delta_r_min)) or not radial_valid):
+        return WAVE_MODEL_CLASS["planar_like"]
+    if radial_valid and not planar_valid:
+        return WAVE_MODEL_CLASS["radial_like"]
+    return WAVE_MODEL_CLASS["ambiguous"]
+
+
 def compute_phase_velocity(kx: float, ky: float, omega: float, f_peak: float = np.nan) -> dict[str, float]:
     """Compute phase speed and propagation vector from the fitted phase plane.
 
@@ -424,6 +655,13 @@ def compute_phase_velocity(kx: float, ky: float, omega: float, f_peak: float = n
         "velocity_y_mm_per_s": velocity_y,
         "velocity_direction_rad": velocity_direction,
     }
+
+
+def compute_radial_phase_speed(radial_k: float, omega: float) -> float:
+    """Return scalar radial phase speed abs(omega)/abs(k)."""
+    if not np.isfinite(radial_k) or radial_k == 0 or not np.isfinite(omega):
+        return np.nan
+    return float(abs(omega) / abs(radial_k))
 
 
 def estimate_omega(
@@ -519,12 +757,23 @@ def _init_output(path: str | Path, config: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as h5:
         group = h5.create_group("phase_waves")
+        integer_columns = {
+            "n_good",
+            "valid",
+            "interval_idx",
+            "spatial_class",
+            "propagation_valid",
+            "radial_sign",
+            "wave_model_class",
+            "radial_valid",
+        }
         for name in RESULT_COLUMNS:
-            dtype = "i8" if name in {"n_good", "valid", "interval_idx", "spatial_class", "propagation_valid"} else "f8"
+            dtype = "i8" if name in integer_columns else "f8"
             group.create_dataset(name, shape=(0,), maxshape=(None,), chunks=(1024,), dtype=dtype)
         group.attrs["columns"] = json.dumps(RESULT_COLUMNS)
         group.attrs["config"] = json.dumps(config, default=str)
         group.attrs["spatial_class_mapping"] = json.dumps(SPATIAL_CLASS)
+        group.attrs["wave_model_class_mapping"] = json.dumps(WAVE_MODEL_CLASS)
         group.attrs["spatial_class_thresholds"] = json.dumps(
             {"near_sync_cycles_lte": 0.25, "resolvable_wave_cycles_gte": 0.5}
         )
@@ -532,6 +781,11 @@ def _init_output(path: str | Path, config: dict[str, object]) -> None:
             "The fitted phase convention is theta(r,t) ~= k dot r + omega t + phi; "
             "v_phi_mm_per_s is signed omega/|k|, phase_speed_mm_per_s is abs(omega)/|k|, "
             "and velocity vector is -omega*k/|k|^2."
+        )
+        group.attrs["radial_velocity_sign_convention"] = (
+            "The radial phase convention is theta(r,t) ~= radial_sign*radial_k*|r-r0| + omega*t + phi; "
+            "radial_phase_speed_mm_per_s is abs(omega)/abs(radial_k), and local velocity is "
+            "-omega*radial_sign*(r-r0)/(|r-r0|*abs(radial_k))."
         )
         group.attrs["units"] = json.dumps(
             {
@@ -554,6 +808,17 @@ def _init_output(path: str | Path, config: dict[str, object]) -> None:
                 "velocity_x_mm_per_s": "mm/s",
                 "velocity_y_mm_per_s": "mm/s",
                 "velocity_direction_rad": "rad",
+                "radial_x0_mm": "mm",
+                "radial_y0_mm": "mm",
+                "radial_k": "rad/mm",
+                "radial_lambda_mm": "mm",
+                "radial_sign": "unitless",
+                "radial_aperture_mm": "mm",
+                "radial_phase_span_rad": "rad",
+                "radial_cycles_across_array": "cycles",
+                "R_radial": "unitless",
+                "delta_R_radial_minus_planar": "unitless",
+                "radial_phase_speed_mm_per_s": "mm/s",
             }
         )
 
@@ -584,11 +849,14 @@ def _window_rows(
     win_ms: float,
     hop_ms: float,
     k_grid: dict[str, np.ndarray | float],
+    radial_grid: dict[str, np.ndarray | float] | None,
     refine: bool,
+    fit_radial: bool,
     band_low: float,
     band_high: float,
     r_min: float,
     coherence_min: float,
+    radial_delta_r_min: float,
 ) -> list[dict[str, float]]:
     win_n = max(2, int(round(float(win_ms) * fs_ds / 1000.0)))
     hop_n = max(1, int(round(float(hop_ms) * fs_ds / 1000.0)))
@@ -626,6 +894,48 @@ def _window_rows(
         valid = int(np.isfinite(fit["R_fit"]) and fit["R_fit"] >= r_min and np.isfinite(mean_weight) and mean_weight >= coherence_min)
         aperture = classify_spatial_aperture(kx, ky, coords_mm)
         propagation_valid = int(valid and int(aperture["spatial_class"]) == SPATIAL_CLASS["resolvable_wave"])
+        if fit_radial and radial_grid is not None:
+            radial_fit = fit_k_radial_phasor(ubar, weights, coords_mm, radial_grid, refine=refine)
+        else:
+            radial_fit = {
+                "radial_x0_mm": np.nan,
+                "radial_y0_mm": np.nan,
+                "radial_k": np.nan,
+                "radial_sign": 0,
+                "R_radial": np.nan,
+            }
+        radial_aperture = classify_radial_aperture(
+            radial_fit["radial_x0_mm"],
+            radial_fit["radial_y0_mm"],
+            radial_fit["radial_k"],
+            coords_mm,
+        )
+        radial_lambda_mm = (
+            float(2.0 * np.pi / abs(radial_fit["radial_k"]))
+            if np.isfinite(radial_fit["radial_k"]) and radial_fit["radial_k"] != 0
+            else np.nan
+        )
+        delta_r = (
+            float(radial_fit["R_radial"] - fit["R_fit"])
+            if np.isfinite(radial_fit["R_radial"]) and np.isfinite(fit["R_fit"])
+            else np.nan
+        )
+        radial_valid = int(
+            np.isfinite(radial_fit["R_radial"])
+            and radial_fit["R_radial"] >= r_min
+            and np.isfinite(mean_weight)
+            and mean_weight >= coherence_min
+            and np.isfinite(radial_aperture["radial_cycles_across_array"])
+            and radial_aperture["radial_cycles_across_array"] >= 0.5
+        )
+        wave_model_class = classify_wave_model(
+            planar_valid=bool(propagation_valid),
+            radial_valid=bool(radial_valid),
+            spatial_class=int(aperture["spatial_class"]),
+            radial_cycles_across_array=float(radial_aperture["radial_cycles_across_array"]),
+            delta_r=delta_r,
+            delta_r_min=radial_delta_r_min,
+        )
         rows.append(
             {
                 "t_center_s": float(center_s),
@@ -644,6 +954,19 @@ def _window_rows(
                 "omega": float(omega),
                 "f_peak": float(f_peak),
                 **velocity,
+                "radial_x0_mm": float(radial_fit["radial_x0_mm"]),
+                "radial_y0_mm": float(radial_fit["radial_y0_mm"]),
+                "radial_k": float(radial_fit["radial_k"]),
+                "radial_lambda_mm": radial_lambda_mm,
+                "radial_sign": int(radial_fit["radial_sign"]),
+                "radial_aperture_mm": float(radial_aperture["radial_aperture_mm"]),
+                "radial_phase_span_rad": float(radial_aperture["radial_phase_span_rad"]),
+                "radial_cycles_across_array": float(radial_aperture["radial_cycles_across_array"]),
+                "R_radial": float(radial_fit["R_radial"]),
+                "delta_R_radial_minus_planar": delta_r,
+                "radial_phase_speed_mm_per_s": compute_radial_phase_speed(radial_fit["radial_k"], omega),
+                "wave_model_class": int(wave_model_class),
+                "radial_valid": radial_valid,
                 "R_fit": float(fit["R_fit"]),
                 "mean_weight": mean_weight,
                 "n_good": int(fit["n_good"]),
@@ -670,6 +993,10 @@ def process_file(
     lambda_max: float = 5.0,
     k_grid_n: int = 41,
     refine: bool = True,
+    fit_radial: bool = False,
+    radial_center_grid_n: int = 15,
+    radial_center_margin_mm: float = 0.0,
+    radial_delta_r_min: float = 0.05,
     r_min: float = 0.2,
     coherence_min: float = 0.0,
     start_s: float = 0.0,
@@ -713,6 +1040,10 @@ def process_file(
         "lambda_min_mm": lambda_min,
         "lambda_max_mm": lambda_max,
         "k_grid_n": k_grid_n,
+        "fit_radial": fit_radial,
+        "radial_center_grid_n": radial_center_grid_n,
+        "radial_center_margin_mm": radial_center_margin_mm,
+        "radial_delta_r_min": radial_delta_r_min,
         "r_min": r_min,
         "coherence_min": coherence_min,
         "start_s": start_s,
@@ -721,6 +1052,7 @@ def process_file(
     }
     _init_output(out_path, config)
     k_grid = make_k_grid(lambda_min, lambda_max, n_grid=k_grid_n)
+    radial_grid = None
 
     for interval_idx, (interval_start_s, interval_stop_s) in enumerate(interval_list):
         core_start = int(round(interval_start_s * fs))
@@ -732,6 +1064,15 @@ def process_file(
             data, coords_mm, fs_loaded, _ = load_chunk(file_path, dataset, read_start, read_stop - read_start)
             if abs(float(fs_loaded) - fs) > 1e-6:
                 raise ValueError(f"fs_raw={fs} does not match file sampling={fs_loaded}")
+            if fit_radial and radial_grid is None:
+                radial_grid = make_radial_grid(
+                    coords_mm,
+                    center_grid_n=radial_center_grid_n,
+                    center_margin_mm=radial_center_margin_mm,
+                    lambda_min_mm=lambda_min,
+                    lambda_max_mm=lambda_max,
+                    k_grid_n=k_grid_n,
+                )
 
             data_ds = bandpass_downsample(
                 data,
@@ -754,11 +1095,14 @@ def process_file(
                 win_ms=win_ms,
                 hop_ms=hop_ms,
                 k_grid=k_grid,
+                radial_grid=radial_grid,
                 refine=refine,
+                fit_radial=fit_radial,
                 band_low=band_low,
                 band_high=band_high,
                 r_min=r_min,
                 coherence_min=coherence_min,
+                radial_delta_r_min=radial_delta_r_min,
             )
             for row in rows:
                 row["interval_idx"] = int(interval_idx)
@@ -789,6 +1133,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda_max", type=float, default=5.0)
     parser.add_argument("--k_grid_n", type=int, default=41)
     parser.add_argument("--no_refine", action="store_true")
+    parser.add_argument("--fit_radial", action="store_true")
+    parser.add_argument("--radial_center_grid_n", type=int, default=15)
+    parser.add_argument("--radial_center_margin_mm", type=float, default=0.0)
+    parser.add_argument("--radial_delta_r_min", type=float, default=0.05)
     parser.add_argument("--r_min", type=float, default=0.2)
     parser.add_argument("--coherence_min", type=float, default=0.0)
     parser.add_argument("--start_s", type=float, default=0.0)
@@ -815,6 +1163,10 @@ def main(argv: list[str] | None = None) -> Path:
         lambda_max=args.lambda_max,
         k_grid_n=args.k_grid_n,
         refine=not args.no_refine,
+        fit_radial=args.fit_radial,
+        radial_center_grid_n=args.radial_center_grid_n,
+        radial_center_margin_mm=args.radial_center_margin_mm,
+        radial_delta_r_min=args.radial_delta_r_min,
         r_min=args.r_min,
         coherence_min=args.coherence_min,
         start_s=args.start_s,
