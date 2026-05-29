@@ -5,12 +5,14 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from phase_waves import (
     SPATIAL_CLASS,
     WAVE_MODEL_CLASS,
+    bandpass_downsample,
     classify_wave_model,
     classify_spatial_aperture,
     compute_phase_velocity,
@@ -19,11 +21,18 @@ from phase_waves import (
     extract_phasors,
     fit_k_radial_phasor,
     fit_k_phasor_plane,
+    fit_pgd_plane,
     inspect_file,
     load_chunk,
     make_k_grid,
+    make_neighbor_edges,
     make_radial_grid,
+    phase_gradient_alignment,
+    prepare_k_grid_basis,
     process_file,
+    process_pgd_file,
+    wavelength_edge_flags,
+    _direction_stability_mask,
 )
 
 
@@ -101,6 +110,66 @@ def test_demodulated_window_phasor_prevents_temporal_cancellation():
     assert abs(est_omega - omega) < 1e-6
 
 
+def test_bandpass_downsample_rejects_band_above_downsampled_nyquist():
+    data = np.random.default_rng(0).normal(size=(2000, 4))
+
+    with pytest.raises(ValueError, match="downsampled Nyquist"):
+        bandpass_downsample(data, fs_raw=1000.0, band_low=80.0, band_high=180.0, fs_ds=300.0)
+
+
+def test_fit_pgd_plane_recovers_synthetic_plane_wave():
+    x, y = np.meshgrid(np.linspace(0.0, 2.5, 12), np.linspace(0.0, 1.5, 8))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    true_k = np.array([2.0, -1.0])
+    phasor = np.exp(1j * (coords @ true_k))
+    weights = np.ones(coords.shape[0])
+    k_grid = make_k_grid(lambda_min_mm=1.0, lambda_max_mm=10.0, n_grid=41)
+    k_grid = prepare_k_grid_basis(k_grid, coords)
+    edges = make_neighbor_edges(coords, n_neighbors=4)
+
+    fit = fit_pgd_plane(phasor, weights, coords, k_grid, gradient_edges=edges, refine=True)
+
+    assert fit["pgd"] > 0.95
+    assert fit["pgd_gradient_alignment"] > 0.90
+    np.testing.assert_allclose([fit["bx"], fit["by"]], true_k, atol=0.08)
+
+
+def test_phase_gradient_alignment_low_for_random_spatial_phase():
+    rng = np.random.default_rng(1)
+    x, y = np.meshgrid(np.linspace(0.0, 2.5, 12), np.linspace(0.0, 1.5, 8))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    theta = rng.uniform(-np.pi, np.pi, coords.shape[0])
+    edges = make_neighbor_edges(coords, n_neighbors=4)
+
+    pgd = phase_gradient_alignment(theta, coords, edges)
+
+    assert np.isfinite(pgd)
+    assert pgd < 0.5
+
+
+def test_fit_pgd_plane_low_for_random_spatial_phase():
+    rng = np.random.default_rng(2)
+    x, y = np.meshgrid(np.linspace(0.0, 3.0, 16), np.linspace(0.0, 2.0, 12))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    phasor = np.exp(1j * rng.uniform(-np.pi, np.pi, coords.shape[0]))
+    weights = np.ones(coords.shape[0])
+    k_grid = prepare_k_grid_basis(make_k_grid(lambda_min_mm=1.0, lambda_max_mm=10.0, n_grid=21), coords)
+    edges = make_neighbor_edges(coords, n_neighbors=4)
+
+    fit = fit_pgd_plane(phasor, weights, coords, k_grid, gradient_edges=edges, refine=False)
+
+    assert np.isfinite(fit["pgd"])
+    assert fit["pgd"] < 0.5
+
+
+def test_pgd_direction_stability_rejects_fast_jumps():
+    direction_rad = np.deg2rad([0.0, 1.0, 2.0, 50.0, 51.0, 52.0])
+
+    stable = _direction_stability_mask(direction_rad, fs_ds=1000.0, max_deg_per_ms=3.0)
+
+    assert stable.tolist() == [True, True, False, False, True, True]
+
+
 def test_classify_spatial_aperture_uses_projected_array_extent():
     coords = np.column_stack((np.linspace(0.0, 2.5, 6), np.zeros(6)))
 
@@ -132,6 +201,17 @@ def test_compute_phase_velocity_uses_constant_phase_direction():
     np.testing.assert_allclose(reversed_velocity["v_phi_mm_per_s"], -5.0)
     np.testing.assert_allclose(reversed_velocity["phase_speed_mm_per_s"], 5.0)
     np.testing.assert_allclose(reversed_velocity["velocity_x_mm_per_s"], 5.0)
+
+
+def test_wavelength_edge_flags_identifies_censored_speeds():
+    assert wavelength_edge_flags(4.95, 0.5, 5.0, 0.98)["at_lambda_max"] == 1
+    assert wavelength_edge_flags(4.95, 0.5, 5.0, 0.98)["speed_censored"] == 1
+    assert wavelength_edge_flags(0.50, 0.5, 5.0, 0.98)["at_lambda_min"] == 1
+    assert wavelength_edge_flags(2.0, 0.5, 5.0, 0.98) == {
+        "at_lambda_min": 0,
+        "at_lambda_max": 0,
+        "speed_censored": 0,
+    }
 
 
 def test_classify_wave_model_compares_planar_and_radial_support():
@@ -290,13 +370,16 @@ def test_process_file_streams_hdf5_windows(tmp_path):
         fit_radial=True,
         radial_center_grid_n=5,
         radial_center_margin_mm=0.0,
+        speed_min_cycles=1.0,
+        lambda_edge_fraction=0.98,
+        speed_min_r=0.18,
     )
 
     with h5py.File(out, "r") as h5:
         group = h5["phase_waves"]
         n = group["t_center_s"].shape[0]
         assert n > 2
-        for name in ("kx", "ky", "k_norm", "lambda_mm", "direction_x", "direction_y", "direction_rad", "aperture_along_k_mm", "phase_span_rad", "cycles_across_array", "spatial_class", "propagation_valid", "omega", "v_phi_mm_per_s", "phase_speed_mm_per_s", "phase_speed_peak_mm_per_s", "velocity_x_mm_per_s", "velocity_y_mm_per_s", "velocity_direction_rad", "radial_x0_mm", "radial_y0_mm", "radial_k", "radial_lambda_mm", "radial_sign", "radial_aperture_mm", "radial_phase_span_rad", "radial_cycles_across_array", "R_radial", "delta_R_radial_minus_planar", "radial_phase_speed_mm_per_s", "wave_model_class", "radial_valid", "R_fit", "valid", "interval_idx"):
+        for name in ("kx", "ky", "k_norm", "lambda_mm", "direction_x", "direction_y", "direction_rad", "aperture_along_k_mm", "phase_span_rad", "cycles_across_array", "spatial_class", "propagation_valid", "omega", "v_phi_mm_per_s", "phase_speed_mm_per_s", "phase_speed_peak_mm_per_s", "velocity_x_mm_per_s", "velocity_y_mm_per_s", "velocity_direction_rad", "planar_at_lambda_min", "planar_at_lambda_max", "planar_speed_censored", "planar_velocity_valid", "radial_x0_mm", "radial_y0_mm", "radial_k", "radial_lambda_mm", "radial_sign", "radial_aperture_mm", "radial_phase_span_rad", "radial_cycles_across_array", "R_radial", "delta_R_radial_minus_planar", "radial_phase_speed_mm_per_s", "radial_at_lambda_min", "radial_at_lambda_max", "radial_speed_censored", "radial_velocity_valid", "wave_model_class", "radial_valid", "R_fit", "valid", "interval_idx"):
             assert group[name].shape == (n,)
         assert np.isfinite(group["R_fit"][:]).any()
         assert np.isfinite(group["phase_speed_mm_per_s"][:]).any()
@@ -305,6 +388,9 @@ def test_process_file_streams_hdf5_windows(tmp_path):
         assert set(group["propagation_valid"][:].tolist()).issubset({0, 1})
         assert set(group["wave_model_class"][:].tolist()).issubset(set(WAVE_MODEL_CLASS.values()))
         assert set(group["radial_valid"][:].tolist()).issubset({0, 1})
+        assert set(group["radial_speed_censored"][:].tolist()).issubset({0, 1})
+        assert set(group["radial_velocity_valid"][:].tolist()).issubset({0, 1})
+        assert set(group["planar_velocity_valid"][:].tolist()).issubset({0, 1})
         assert "spatial_class_mapping" in group.attrs
         assert "wave_model_class_mapping" in group.attrs
         assert "radial_velocity_sign_convention" in group.attrs
@@ -342,3 +428,55 @@ def test_process_file_accepts_multiple_intervals(tmp_path):
         assert t.size > 0
         assert set(g["interval_idx"][:].tolist()).issubset({0, 1})
         assert np.all(((t >= 0.0) & (t < 0.35)) | ((t >= 0.70) & (t < 1.0)))
+
+
+def test_process_pgd_file_writes_streaming_outputs(tmp_path):
+    path = tmp_path / "synthetic.raw.h5"
+    out = tmp_path / "pgd_waves.h5"
+    _write_synthetic_maxtwo(path)
+
+    process_pgd_file(
+        path,
+        "data0000",
+        out,
+        fs_ds=250.0,
+        band_low=30.0,
+        band_high=80.0,
+        chunk_s=0.3,
+        overlap_s=0.05,
+        analysis_pad_s=0.02,
+        lambda_min=1.0,
+        lambda_max=10.0,
+        k_grid_n=13,
+        refine=False,
+        intervals=[(0.0, 0.35), (0.70, 1.0)],
+        pgd_threshold=0.3,
+        pgd_min_duration_ms=5.0,
+        pgd_max_direction_change_deg_per_ms=20.0,
+        max_channels_per_block=3,
+    )
+
+    with h5py.File(out, "r") as h5:
+        assert "pgd_waves" in h5
+        g = h5["pgd_waves"]
+        for name in (
+            "pgd",
+            "pgd_r2_adj",
+            "pgd_gradient_alignment",
+            "bx",
+            "by",
+            "k_norm_pgd",
+            "speed_pgd_mm_per_s",
+            "pgd_valid",
+            "interval_idx",
+        ):
+            assert name in g
+        t = g["t_center_s"][:]
+        assert t.size > 0
+        assert np.isfinite(g["pgd"][:]).any()
+        assert np.isfinite(g["speed_pgd_mm_per_s"][:]).any()
+        assert set(g["interval_idx"][:].tolist()).issubset({0, 1})
+        assert set(g["pgd_valid"][:].tolist()).issubset({0, 1})
+        assert np.all(((t >= 0.0) & (t < 0.35)) | ((t >= 0.70) & (t < 1.0)))
+        assert "pgd_convention" in g.attrs
+        assert "validity_criteria" in g.attrs
