@@ -606,6 +606,35 @@ def test_compose_figure_labels_numpy_axes_bundle_without_suptitle():
     plt.close(composed.fig)
 
 
+def test_compose_figure_panel_labels_align_with_and_without_suptitle():
+    def draw_line(_data, ax, **_opts):
+        ax.plot([0, 1], [0, 1])
+        return {"axes": ax}
+
+    composed = compose_figure(
+        figure(width=6, height=3, constrained_layout=False),
+        [
+            panel("plain", label="a", loc=(0, 0, 1, 6), draw=draw_line),
+            panel("titled", label="b", suptitle="Panel title", loc=(0, 6, 1, 6), draw=draw_line),
+        ],
+    )
+    composed.fig.subplots_adjust(left=0.02, right=0.98)
+    composed.fig.canvas.draw()
+
+    labels = {
+        text.get_text(): text
+        for ax in composed.fig.axes
+        for text in ax.texts
+        if text.get_text() in {"a", "b"}
+    }
+    label_positions = {
+        label: text.get_transform().transform(text.get_position())
+        for label, text in labels.items()
+    }
+    assert label_positions["a"][1] == pytest.approx(label_positions["b"][1])
+    plt.close(composed.fig)
+
+
 def test_panel_suptitle_clears_child_axes_titles():
     fig, axes = plt.subplots(1, 2, figsize=(5, 2), constrained_layout=True)
     for idx, ax in enumerate(axes):

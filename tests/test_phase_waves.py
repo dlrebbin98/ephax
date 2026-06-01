@@ -12,19 +12,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from phase_waves import (
     SPATIAL_CLASS,
     WAVE_MODEL_CLASS,
+    analyze_excitable_phase_front,
     bandpass_downsample,
     classify_wave_model,
     classify_spatial_aperture,
+    combine_excitable_phase_calibrations,
     compute_phase_velocity,
+    detect_phase_crossings,
     demodulated_window_phasor,
+    estimate_excitable_phase,
     estimate_omega,
     extract_phasors,
     fit_k_radial_phasor,
     fit_k_phasor_plane,
+    fit_arrival_time_plane,
+    fit_arrival_time_radial,
+    fit_local_arrival_velocity,
     fit_pgd_plane,
     inspect_file,
     load_chunk,
+    estimate_local_phase_velocity,
     make_k_grid,
+    make_local_phase_neighborhoods,
     make_neighbor_edges,
     make_radial_grid,
     phase_gradient_alignment,
@@ -32,6 +41,10 @@ from phase_waves import (
     process_file,
     process_pgd_file,
     wavelength_edge_flags,
+    append_wavefront_rows,
+    initialize_wavefront_cache,
+    read_wavefront_cache,
+    select_coherent_phase_front,
     _direction_stability_mask,
 )
 
@@ -201,6 +214,217 @@ def test_compute_phase_velocity_uses_constant_phase_direction():
     np.testing.assert_allclose(reversed_velocity["v_phi_mm_per_s"], -5.0)
     np.testing.assert_allclose(reversed_velocity["phase_speed_mm_per_s"], 5.0)
     np.testing.assert_allclose(reversed_velocity["velocity_x_mm_per_s"], 5.0)
+
+
+def test_estimate_local_phase_velocity_recovers_synthetic_plane_wave():
+    fs = 500.0
+    t = np.arange(40) / fs
+    x, y = np.meshgrid(np.linspace(0.0, 1.0, 8), np.linspace(0.0, 1.0, 8))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    true_k = np.array([4.0, -2.0])
+    true_omega = 2.0 * np.pi * 45.0
+    u = np.exp(1j * (true_omega * t[:, None] + coords @ true_k))
+    amp = np.ones_like(u.real)
+    neighborhoods = make_local_phase_neighborhoods(
+        coords,
+        radius_mm=0.35,
+        min_neighbors=8,
+        max_radius_mm=0.50,
+        max_neighbors=16,
+    )
+
+    local = estimate_local_phase_velocity(
+        u,
+        amp,
+        coords,
+        neighborhoods,
+        fs_ds=fs,
+        omega_smooth_ms=8.0,
+        min_r_local=0.95,
+        min_cycles_local=0.0,
+    )
+
+    valid = local["valid"]
+    assert np.count_nonzero(valid) > 0
+    np.testing.assert_allclose(np.nanmedian(local["kx"][valid]), true_k[0], atol=0.08)
+    np.testing.assert_allclose(np.nanmedian(local["ky"][valid]), true_k[1], atol=0.08)
+    np.testing.assert_allclose(
+        np.nanmedian(local["speed_mm_per_s"][valid]),
+        abs(true_omega) / np.linalg.norm(true_k),
+        rtol=0.02,
+    )
+
+
+def test_make_local_phase_neighborhoods_rejects_collinear_geometry():
+    coords = np.column_stack((np.linspace(0.0, 1.0, 20), np.zeros(20)))
+
+    neighborhoods = make_local_phase_neighborhoods(
+        coords,
+        radius_mm=0.5,
+        min_neighbors=4,
+        max_radius_mm=0.8,
+        max_neighbors=10,
+        min_geometry_ratio=0.1,
+    )
+
+    assert not np.any(neighborhoods["valid"])
+
+
+def test_estimate_excitable_phase_corrects_phase_occupancy():
+    phase = np.concatenate([np.full(700, -1.0), np.full(300, 1.0)])
+    u = np.exp(1j * phase)[:, None]
+    time_s = np.arange(phase.size, dtype=float) / 1000.0
+    electrodes = np.array([11])
+    spike_idx = np.concatenate([np.arange(0, 700, 35), np.arange(700, 1000, 5)])
+
+    calibration = estimate_excitable_phase(
+        u,
+        time_s,
+        electrodes,
+        time_s[spike_idx],
+        np.full(spike_idx.size, 11),
+        n_bins=36,
+    )
+
+    assert abs(np.angle(np.exp(1j * (calibration["theta_excitable_rad"] - 1.0)))) < 0.2
+    combined = combine_excitable_phase_calibrations([calibration, calibration])
+    np.testing.assert_allclose(combined["theta_excitable_rad"], calibration["theta_excitable_rad"])
+
+
+def test_detect_phase_crossings_interpolates_subsample_times():
+    time_s = np.array([0.0, 0.01, 0.02])
+    theta = np.array([-0.5, 0.5, 1.5])
+    u = np.exp(1j * theta)[:, None]
+
+    crossings = detect_phase_crossings(u, time_s, 0.0)
+
+    np.testing.assert_allclose(crossings[0], [0.005], atol=1e-12)
+
+
+def test_select_coherent_phase_front_does_not_mix_neighboring_cycles():
+    anchor = 1.0
+    period = 1.0 / 45.0
+    crossing = anchor + np.linspace(-0.003, 0.003, 80)
+    crossings = [np.array([value - period, value, value + period]) for value in crossing]
+
+    front = select_coherent_phase_front(crossings, anchor, min_electrodes=50, match_max_ms=8.0)
+
+    assert front["valid"] == 1
+    assert front["n_electrodes"] == 80
+    assert abs(front["front_time_s"] - anchor) < 1e-6
+    np.testing.assert_allclose(front["arrival_time_s"], crossing)
+
+
+def test_local_arrival_velocity_recovers_planar_front():
+    x, y = np.meshgrid(np.linspace(0.0, 1.0, 10), np.linspace(0.0, 1.0, 10))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    gradient = np.array([0.004, -0.002])
+    arrival = 1.0 + coords @ gradient
+    neighborhoods = make_local_phase_neighborhoods(
+        coords,
+        radius_mm=0.35,
+        min_neighbors=8,
+        max_radius_mm=0.5,
+        max_neighbors=20,
+    )
+
+    local = fit_local_arrival_velocity(arrival, coords, neighborhoods, min_neighbors=8)
+    valid = local["valid"]
+    expected_velocity = gradient / np.sum(gradient * gradient)
+
+    assert np.count_nonzero(valid) > 0
+    np.testing.assert_allclose(np.nanmedian(local["velocity_x_mm_per_s"][valid]), expected_velocity[0], rtol=0.02)
+    np.testing.assert_allclose(np.nanmedian(local["velocity_y_mm_per_s"][valid]), expected_velocity[1], rtol=0.02)
+    global_fit = fit_arrival_time_plane(arrival, coords)
+    np.testing.assert_allclose(global_fit["planar_speed_mm_per_s"], 1.0 / np.linalg.norm(gradient), rtol=0.01)
+
+
+def test_arrival_time_radial_fit_recovers_source_and_speed():
+    x, y = np.meshgrid(np.linspace(0.0, 3.0, 14), np.linspace(0.0, 2.0, 10))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    center = np.array([1.4, 0.9])
+    speed = 120.0
+    arrival = 1.0 + np.linalg.norm(coords - center, axis=1) / speed
+
+    fit = fit_arrival_time_radial(arrival, coords, center_grid_n=31)
+
+    np.testing.assert_allclose([fit["radial_x0_mm"], fit["radial_y0_mm"]], center, atol=0.12)
+    np.testing.assert_allclose(fit["radial_speed_mm_per_s"], speed, rtol=0.05)
+    assert fit["radial_sign"] == 1
+
+
+def test_noisy_local_arrivals_are_retained_but_fail_qc():
+    rng = np.random.default_rng(5)
+    x, y = np.meshgrid(np.linspace(0.0, 1.0, 8), np.linspace(0.0, 1.0, 8))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    arrival = 1.0 + coords @ np.array([0.004, 0.002]) + rng.normal(0.0, 0.010, coords.shape[0])
+    neighborhoods = make_local_phase_neighborhoods(coords, radius_mm=0.4, min_neighbors=8, max_radius_mm=0.5)
+
+    local = fit_local_arrival_velocity(arrival, coords, neighborhoods, min_neighbors=8, max_residual_ms=1.0)
+
+    assert np.isfinite(local["speed_mm_per_s"]).any()
+    assert not np.any(local["valid"])
+
+
+def test_analyze_excitable_phase_front_recovers_selected_planar_crossing():
+    fs = 1000.0
+    time_s = np.arange(0.94, 1.06, 1.0 / fs)
+    x, y = np.meshgrid(np.linspace(0.0, 1.0, 8), np.linspace(0.0, 1.0, 8))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    arrival = 1.0 + coords @ np.array([0.003, -0.001])
+    omega = 2.0 * np.pi * 45.0
+    u = np.exp(1j * omega * (time_s[:, None] - arrival[None, :]))
+    neighborhoods = make_local_phase_neighborhoods(
+        coords,
+        radius_mm=0.35,
+        min_neighbors=8,
+        max_radius_mm=0.5,
+        max_neighbors=20,
+    )
+
+    result = analyze_excitable_phase_front(
+        u,
+        time_s,
+        coords,
+        neighborhoods,
+        theta_excitable_rad=0.0,
+        anchor_time_s=1.0,
+        min_electrodes=50,
+        min_neighbors=8,
+    )
+
+    assert result["front"]["valid"] == 1
+    np.testing.assert_allclose(result["front"]["arrival_time_s"], arrival, atol=1e-6)
+    np.testing.assert_allclose(result["planar"]["planar_speed_mm_per_s"], 1.0 / np.hypot(0.003, -0.001), rtol=0.01)
+
+
+def test_wavefront_cache_round_trip(tmp_path):
+    path = tmp_path / "wavefront.h5"
+    calibration = {
+        "phase_bin_edges_rad": np.linspace(-np.pi, np.pi, 5),
+        "phase_bin_centers_rad": np.linspace(-2.0, 2.0, 4),
+        "occupancy_counts": np.arange(4),
+        "spike_phase_counts": np.arange(4) + 1,
+        "relative_spike_probability": np.ones(4),
+        "theta_excitable_rad": 0.5,
+        "n_spikes_sampled": 10,
+    }
+    initialize_wavefront_cache(path, calibration, config={"band_low": 42.0, "band_high": 48.0})
+    append_wavefront_rows(path, "wavefront_events", [{"event_idx": 1, "front_time_s": 2.0}])
+    append_wavefront_rows(
+        path,
+        "wavefront_local",
+        {"event_idx": np.array([1, 1]), "electrode": np.array([10, 11]), "speed_mm_per_s": np.array([90.0, 110.0])},
+    )
+
+    payload = read_wavefront_cache(path)
+
+    assert set(payload) == {"wavefront_calibration", "wavefront_events", "wavefront_local"}
+    np.testing.assert_allclose(payload["wavefront_calibration"]["theta_excitable_rad"], 0.5)
+    np.testing.assert_allclose(payload["wavefront_events"]["front_time_s"], [2.0])
+    np.testing.assert_allclose(payload["wavefront_local"]["speed_mm_per_s"], [90.0, 110.0])
+    with pytest.raises(ValueError, match="match the existing cache schema"):
+        append_wavefront_rows(path, "wavefront_events", [{"event_idx": 2}])
 
 
 def test_wavelength_edge_flags_identifies_censored_speeds():

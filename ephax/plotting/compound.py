@@ -6,7 +6,6 @@ from typing import Any, Callable, Mapping, Sequence
 from matplotlib.axes import Axes
 
 from .layout import FigureSpec, PanelSpec, make_figure_grid, panel_subplotspec, required_nrows
-from .panels import add_panel_label
 from .style import FONT_SIZES
 
 
@@ -139,16 +138,12 @@ def compose_figure(fig_spec: FigureSpec, panel_specs: Sequence[PanelSpec | Panel
             composed.axes[panel.key] = group_axes
             composed.rendered[panel.key] = group_rendered
             if title_ax is not None:
-                _draw_panel_header(title_ax, panel.suptitle, panel.label)
-            elif panel.label:
-                add_panel_label(_label_axes(group_axes), panel.label)
+                _draw_panel_header(title_ax, panel.suptitle)
         elif isinstance(spec, PanelRenderSpec):
             axes = _make_axes(fig, content_spec, spec)
             composed.axes[panel.key] = axes
             if title_ax is not None:
-                _draw_panel_header(title_ax, panel.suptitle, panel.label)
-            elif panel.label:
-                add_panel_label(_label_axes(axes), panel.label)
+                _draw_panel_header(title_ax, panel.suptitle)
             options = dict(spec.options or {})
             options.setdefault("compact", panel.compact)
             options.setdefault("show_legend", panel.show_legend)
@@ -158,9 +153,9 @@ def compose_figure(fig_spec: FigureSpec, panel_specs: Sequence[PanelSpec | Panel
             axes = _make_axes(fig, content_spec, spec)
             composed.axes[panel.key] = axes
             if title_ax is not None:
-                _draw_panel_header(title_ax, panel.suptitle, panel.label)
-            elif panel.label:
-                add_panel_label(_label_axes(axes), panel.label)
+                _draw_panel_header(title_ax, panel.suptitle)
+        if panel.label:
+            _draw_panel_label(fig, grid, panel)
 
     return composed
 
@@ -198,29 +193,42 @@ def _panel_content_spec(fig, grid, panel: PanelSpec):
     subplotspec = panel_subplotspec(grid, panel)
     if not panel.suptitle:
         return subplotspec, None
-    title_grid = subplotspec.subgridspec(2, 1, height_ratios=[0.14, 1.0], hspace=0.15)
+    panel_height = subplotspec.get_position(fig).height
+    title_height = min(0.04, 0.30 * panel_height)
+    title_grid = subplotspec.subgridspec(
+        2,
+        1,
+        height_ratios=[title_height, panel_height - title_height],
+        hspace=0.0,
+    )
     title_ax = fig.add_subplot(title_grid[0, 0])
     title_ax.set_axis_off()
     return title_grid[1, 0], title_ax
 
 
-def _draw_panel_header(ax, title: str | None, label: str | None):
-    if label:
-        ax.text(
-            0.0,
-            0.45,
-            label.lower() if len(label) == 1 and label.isalpha() else label,
-            ha="left",
-            va="center",
-            transform=ax.transAxes,
-            fontweight="bold",
-            fontstyle="normal",
-            fontsize=FONT_SIZES["panel_label"],
-        )
+def _draw_panel_label(fig, grid, panel: PanelSpec):
+    label_ax = fig.add_subplot(panel_subplotspec(grid, panel))
+    label_ax.set_axis_off()
+    label_ax.patch.set_visible(False)
+    label_ax.set_zorder(10)
+    label_ax.text(
+        0.0,
+        1.02,
+        panel.label.lower() if len(panel.label) == 1 and panel.label.isalpha() else panel.label,
+        ha="left",
+        va="bottom",
+        transform=label_ax.transAxes,
+        fontweight="bold",
+        fontstyle="normal",
+        fontsize=FONT_SIZES["panel_label"],
+    )
+
+
+def _draw_panel_header(ax, title: str | None):
     if title:
         ax.text(
             0.5,
-            0.45,
+            0.5,
             title,
             ha="center",
             va="center",

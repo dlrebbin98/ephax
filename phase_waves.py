@@ -9,6 +9,7 @@ from typing import Iterable
 import h5py
 import numpy as np
 from scipy.optimize import minimize
+from scipy.ndimage import uniform_filter1d
 from scipy.signal import butter, hilbert, resample_poly, sosfiltfilt, welch
 from scipy.spatial import cKDTree
 
@@ -598,6 +599,749 @@ def phase_gradient_alignment(theta: np.ndarray, coords_mm: np.ndarray, edges: np
     if mean_norm <= 0:
         return np.nan
     return float(np.clip(np.linalg.norm(mean_gradient) / mean_norm, 0.0, 1.0))
+
+
+def make_local_phase_neighborhoods(
+    coords_mm: np.ndarray,
+    *,
+    radius_mm: float = 0.30,
+    min_neighbors: int = 12,
+    max_radius_mm: float = 0.45,
+    max_neighbors: int = 24,
+    min_geometry_ratio: float = 0.10,
+) -> dict[str, object]:
+    """Precompute hybrid-radius neighborhoods for local phase-gradient fits.
+
+    The center electrode is included in each returned index array but is not
+    counted toward ``min_neighbors`` or ``max_neighbors``. Sparse neighborhoods
+    expand from ``radius_mm`` up to ``max_radius_mm`` using nearest neighbors.
+    """
+    coords_mm = np.asarray(coords_mm, dtype=np.float64)
+    if coords_mm.ndim != 2 or coords_mm.shape[1] != 2:
+        raise ValueError("coords_mm must have shape (n_channels, 2)")
+    if not (0 < radius_mm <= max_radius_mm):
+        raise ValueError("Require 0 < radius_mm <= max_radius_mm")
+    if not (2 <= min_neighbors <= max_neighbors):
+        raise ValueError("Require 2 <= min_neighbors <= max_neighbors")
+    if not (0 <= min_geometry_ratio <= 1):
+        raise ValueError("min_geometry_ratio must lie in [0, 1]")
+
+    finite = np.isfinite(coords_mm).all(axis=1)
+    finite_idx = np.flatnonzero(finite)
+    neighborhoods: list[np.ndarray] = [np.empty(0, dtype=np.int64) for _ in range(coords_mm.shape[0])]
+    geometry_ratio = np.full(coords_mm.shape[0], np.nan, dtype=np.float64)
+    valid = np.zeros(coords_mm.shape[0], dtype=bool)
+    if finite_idx.size < min_neighbors + 1:
+        return {
+            "indices": neighborhoods,
+            "geometry_ratio": geometry_ratio,
+            "valid": valid,
+            "radius_mm": float(radius_mm),
+            "max_radius_mm": float(max_radius_mm),
+            "min_neighbors": int(min_neighbors),
+            "max_neighbors": int(max_neighbors),
+        }
+
+    finite_coords = coords_mm[finite]
+    tree = cKDTree(finite_coords)
+    query_k = min(int(max_neighbors) + 1, finite_idx.size)
+    distances, nearest = tree.query(finite_coords, k=query_k)
+    for local_i, center_idx in enumerate(finite_idx):
+        dist_i = np.atleast_1d(distances[local_i])
+        nearest_i = np.atleast_1d(nearest[local_i])
+        is_other = nearest_i != local_i
+        within_default = is_other & (dist_i <= float(radius_mm))
+        selected = nearest_i[within_default]
+        if selected.size < min_neighbors:
+            within_extended = is_other & (dist_i <= float(max_radius_mm))
+            selected = nearest_i[within_extended]
+        selected = selected[: int(max_neighbors)]
+        if selected.size < min_neighbors:
+            continue
+
+        indices = np.concatenate(([int(center_idx)], finite_idx[selected].astype(np.int64, copy=False)))
+        local_coords = coords_mm[indices]
+        centered = local_coords - np.mean(local_coords, axis=0, keepdims=True)
+        covariance = centered.T @ centered / max(1, local_coords.shape[0] - 1)
+        eigvals = np.linalg.eigvalsh(covariance)
+        ratio = float(eigvals[0] / eigvals[-1]) if eigvals[-1] > 0 else 0.0
+        geometry_ratio[int(center_idx)] = ratio
+        if ratio < float(min_geometry_ratio):
+            continue
+        neighborhoods[int(center_idx)] = indices
+        valid[int(center_idx)] = True
+
+    return {
+        "indices": neighborhoods,
+        "geometry_ratio": geometry_ratio,
+        "valid": valid,
+        "radius_mm": float(radius_mm),
+        "max_radius_mm": float(max_radius_mm),
+        "min_neighbors": int(min_neighbors),
+        "max_neighbors": int(max_neighbors),
+    }
+
+
+def estimate_local_phase_velocity(
+    u: np.ndarray,
+    amp: np.ndarray,
+    coords_mm: np.ndarray,
+    neighborhoods: dict[str, object],
+    *,
+    fs_ds: float,
+    omega_smooth_ms: float = 8.0,
+    min_r_local: float = 0.50,
+    min_cycles_local: float = 0.50,
+    max_speed_mm_per_s: float | None = None,
+    min_amplitude_percentile: float = 20.0,
+    amplitude_weighted: bool = True,
+) -> dict[str, np.ndarray]:
+    """Estimate local phase gradients and normal phase-advance velocities.
+
+    The local wrapped phase differences are regressed against coordinate
+    differences. Temporal phase derivatives are unwrapped only along time and
+    averaged inside each spatial neighborhood. The returned velocity is the
+    normal phase velocity ``-omega * k / |k|^2``.
+    """
+    u = np.asarray(u)
+    amp = np.asarray(amp, dtype=np.float64)
+    coords_mm = np.asarray(coords_mm, dtype=np.float64)
+    if u.ndim != 2 or amp.shape != u.shape:
+        raise ValueError("u and amp must have matching shape (n_samples, n_channels)")
+    if coords_mm.shape != (u.shape[1], 2):
+        raise ValueError("coords_mm must have shape (n_channels, 2)")
+    if fs_ds <= 0:
+        raise ValueError("fs_ds must be positive")
+
+    n_samples, n_channels = u.shape
+    shape = (n_samples, n_channels)
+    kx = np.full(shape, np.nan, dtype=np.float64)
+    ky = np.full(shape, np.nan, dtype=np.float64)
+    omega = np.full(shape, np.nan, dtype=np.float64)
+    r_local = np.full(shape, np.nan, dtype=np.float64)
+    cycles = np.full(shape, np.nan, dtype=np.float64)
+    velocity_x = np.full(shape, np.nan, dtype=np.float64)
+    velocity_y = np.full(shape, np.nan, dtype=np.float64)
+    speed = np.full(shape, np.nan, dtype=np.float64)
+
+    theta = np.unwrap(np.angle(u), axis=0)
+    channel_omega = np.gradient(theta, 1.0 / float(fs_ds), axis=0)
+    smooth_samples = max(1, int(round(float(omega_smooth_ms) * float(fs_ds) / 1000.0)))
+    if smooth_samples > 1:
+        channel_omega = uniform_filter1d(channel_omega, size=smooth_samples, axis=0, mode="nearest")
+
+    neighborhood_indices = neighborhoods.get("indices")
+    neighborhood_valid = np.asarray(neighborhoods.get("valid"), dtype=bool)
+    if not isinstance(neighborhood_indices, list) or neighborhood_valid.shape != (n_channels,):
+        raise ValueError("neighborhoods must come from make_local_phase_neighborhoods")
+
+    for center_idx in np.flatnonzero(neighborhood_valid):
+        indices = np.asarray(neighborhood_indices[int(center_idx)], dtype=np.int64)
+        if indices.size < 3:
+            continue
+        delta_r = coords_mm[indices] - coords_mm[int(center_idx)]
+        dx = delta_r[:, 0]
+        dy = delta_r[:, 1]
+        phase_delta = np.angle(u[:, indices] * np.conj(u[:, int(center_idx), None]))
+        usable_amp = np.isfinite(amp[:, indices]) & (amp[:, indices] > 0)
+        if amplitude_weighted:
+            weights = np.where(usable_amp, amp[:, indices], 0.0)
+        else:
+            weights = usable_amp.astype(np.float64)
+
+        a11 = np.sum(weights * dx[None, :] * dx[None, :], axis=1)
+        a12 = np.sum(weights * dx[None, :] * dy[None, :], axis=1)
+        a22 = np.sum(weights * dy[None, :] * dy[None, :], axis=1)
+        b1 = np.sum(weights * dx[None, :] * phase_delta, axis=1)
+        b2 = np.sum(weights * dy[None, :] * phase_delta, axis=1)
+        determinant = a11 * a22 - a12 * a12
+        solvable = np.isfinite(determinant) & (determinant > 1e-15)
+        grad_x = np.divide(a22 * b1 - a12 * b2, determinant, out=np.full(n_samples, np.nan), where=solvable)
+        grad_y = np.divide(a11 * b2 - a12 * b1, determinant, out=np.full(n_samples, np.nan), where=solvable)
+        kx[:, int(center_idx)] = grad_x
+        ky[:, int(center_idx)] = grad_y
+
+        predicted_delta = grad_x[:, None] * dx[None, :] + grad_y[:, None] * dy[None, :]
+        residual_phasor = np.exp(1j * (phase_delta - predicted_delta))
+        weight_sum = np.sum(weights, axis=1)
+        r_local[:, int(center_idx)] = np.divide(
+            np.abs(np.sum(weights * residual_phasor, axis=1)),
+            weight_sum,
+            out=np.full(n_samples, np.nan),
+            where=weight_sum > 0,
+        )
+        omega[:, int(center_idx)] = np.divide(
+            np.sum(weights * channel_omega[:, indices], axis=1),
+            weight_sum,
+            out=np.full(n_samples, np.nan),
+            where=weight_sum > 0,
+        )
+
+        k_norm = np.hypot(grad_x, grad_y)
+        unit_x = np.divide(grad_x, k_norm, out=np.full(n_samples, np.nan), where=k_norm > 0)
+        unit_y = np.divide(grad_y, k_norm, out=np.full(n_samples, np.nan), where=k_norm > 0)
+        projection = delta_r[:, 0][None, :] * unit_x[:, None] + delta_r[:, 1][None, :] * unit_y[:, None]
+        aperture = np.nanmax(projection, axis=1) - np.nanmin(projection, axis=1)
+        cycles[:, int(center_idx)] = k_norm * aperture / (2.0 * np.pi)
+        speed[:, int(center_idx)] = np.divide(
+            np.abs(omega[:, int(center_idx)]),
+            k_norm,
+            out=np.full(n_samples, np.nan),
+            where=k_norm > 0,
+        )
+        velocity_x[:, int(center_idx)] = np.divide(
+            -omega[:, int(center_idx)] * grad_x,
+            k_norm * k_norm,
+            out=np.full(n_samples, np.nan),
+            where=k_norm > 0,
+        )
+        velocity_y[:, int(center_idx)] = np.divide(
+            -omega[:, int(center_idx)] * grad_y,
+            k_norm * k_norm,
+            out=np.full(n_samples, np.nan),
+            where=k_norm > 0,
+        )
+
+    finite_amp = amp[np.isfinite(amp)]
+    amp_floor = float(np.percentile(finite_amp, min_amplitude_percentile)) if finite_amp.size else np.nan
+    valid = (
+        np.isfinite(speed)
+        & np.isfinite(r_local)
+        & (r_local >= float(min_r_local))
+        & np.isfinite(cycles)
+        & (cycles >= float(min_cycles_local))
+        & np.isfinite(amp)
+        & (amp >= amp_floor)
+    )
+    if max_speed_mm_per_s is not None:
+        valid &= speed <= float(max_speed_mm_per_s)
+
+    return {
+        "kx": kx,
+        "ky": ky,
+        "omega": omega,
+        "R_local": r_local,
+        "cycles_across_neighborhood": cycles,
+        "speed_mm_per_s": speed,
+        "velocity_x_mm_per_s": velocity_x,
+        "velocity_y_mm_per_s": velocity_y,
+        "valid": valid,
+        "amplitude_floor": np.asarray(amp_floor),
+    }
+
+
+def _phase_bin_edges(n_bins: int) -> np.ndarray:
+    if int(n_bins) < 4:
+        raise ValueError("n_bins must be at least 4")
+    return np.linspace(-np.pi, np.pi, int(n_bins) + 1, dtype=np.float64)
+
+
+def estimate_excitable_phase(
+    u: np.ndarray,
+    time_s: np.ndarray,
+    electrodes: np.ndarray,
+    spike_times_s: np.ndarray,
+    spike_electrodes: np.ndarray,
+    *,
+    n_bins: int = 36,
+    pseudocount: float = 1.0,
+) -> dict[str, np.ndarray | float | int]:
+    """Estimate spike-associated Hilbert phase after correcting phase occupancy."""
+    u = np.asarray(u)
+    time_s = np.asarray(time_s, dtype=np.float64)
+    electrodes = np.asarray(electrodes)
+    spike_times_s = np.asarray(spike_times_s, dtype=np.float64)
+    spike_electrodes = np.asarray(spike_electrodes)
+    if u.ndim != 2 or time_s.shape != (u.shape[0],):
+        raise ValueError("u and time_s must have shapes (n_samples, n_channels) and (n_samples,)")
+    if electrodes.shape != (u.shape[1],):
+        raise ValueError("electrodes must have shape (n_channels,)")
+    if spike_times_s.shape != spike_electrodes.shape:
+        raise ValueError("spike_times_s and spike_electrodes must have matching shapes")
+    if time_s.size < 2 or np.any(np.diff(time_s) <= 0):
+        raise ValueError("time_s must contain at least two strictly increasing values")
+    if pseudocount < 0:
+        raise ValueError("pseudocount must be non-negative")
+
+    edges = _phase_bin_edges(n_bins)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    occupancy_counts = np.histogram(np.angle(u).ravel(), bins=edges)[0].astype(np.float64)
+    spike_phase_counts = np.zeros(int(n_bins), dtype=np.float64)
+    electrode_to_idx = {int(electrode): idx for idx, electrode in enumerate(electrodes)}
+    sampled_phases = []
+    in_time = (spike_times_s >= time_s[0]) & (spike_times_s <= time_s[-1])
+    for electrode in np.unique(spike_electrodes[in_time]):
+        channel_idx = electrode_to_idx.get(int(electrode))
+        if channel_idx is None:
+            continue
+        times = spike_times_s[in_time & (spike_electrodes == electrode)]
+        real = np.interp(times, time_s, np.real(u[:, channel_idx]))
+        imag = np.interp(times, time_s, np.imag(u[:, channel_idx]))
+        sampled_phases.append(np.angle(real + 1j * imag))
+    spike_phases = np.concatenate(sampled_phases) if sampled_phases else np.empty(0, dtype=np.float64)
+    if spike_phases.size:
+        spike_phase_counts += np.histogram(spike_phases, bins=edges)[0]
+
+    occupancy_probability = (occupancy_counts + float(pseudocount)) / (
+        np.sum(occupancy_counts) + float(pseudocount) * int(n_bins)
+    )
+    spike_probability = (spike_phase_counts + float(pseudocount)) / (
+        np.sum(spike_phase_counts) + float(pseudocount) * int(n_bins)
+    )
+    relative_spike_probability = np.divide(
+        spike_probability,
+        occupancy_probability,
+        out=np.zeros_like(spike_probability),
+        where=occupancy_counts > 0,
+    )
+    mean_relative = float(np.mean(relative_spike_probability))
+    if mean_relative > 0:
+        relative_spike_probability /= mean_relative
+    best_idx = int(np.nanargmax(relative_spike_probability))
+    return {
+        "phase_bin_edges_rad": edges,
+        "phase_bin_centers_rad": centers,
+        "occupancy_counts": occupancy_counts,
+        "spike_phase_counts": spike_phase_counts,
+        "relative_spike_probability": relative_spike_probability,
+        "theta_excitable_rad": float(centers[best_idx]),
+        "n_spikes_sampled": int(spike_phases.size),
+    }
+
+
+def combine_excitable_phase_calibrations(
+    calibrations: Iterable[dict[str, np.ndarray | float | int]],
+    *,
+    pseudocount: float = 1.0,
+) -> dict[str, np.ndarray | float | int]:
+    """Combine chunk-level phase calibration counts without retaining phasors."""
+    calibrations = list(calibrations)
+    if not calibrations:
+        raise ValueError("At least one calibration is required")
+    edges = np.asarray(calibrations[0]["phase_bin_edges_rad"], dtype=np.float64)
+    centers = np.asarray(calibrations[0]["phase_bin_centers_rad"], dtype=np.float64)
+    occupancy = np.zeros(centers.size, dtype=np.float64)
+    spike_counts = np.zeros(centers.size, dtype=np.float64)
+    n_spikes = 0
+    for calibration in calibrations:
+        if not np.allclose(calibration["phase_bin_edges_rad"], edges):
+            raise ValueError("All calibrations must use the same phase bins")
+        occupancy += np.asarray(calibration["occupancy_counts"], dtype=np.float64)
+        spike_counts += np.asarray(calibration["spike_phase_counts"], dtype=np.float64)
+        n_spikes += int(calibration["n_spikes_sampled"])
+    occupancy_probability = (occupancy + float(pseudocount)) / (np.sum(occupancy) + float(pseudocount) * centers.size)
+    spike_probability = (spike_counts + float(pseudocount)) / (np.sum(spike_counts) + float(pseudocount) * centers.size)
+    relative = np.divide(spike_probability, occupancy_probability, out=np.zeros_like(spike_probability), where=occupancy > 0)
+    mean_relative = float(np.mean(relative))
+    if mean_relative > 0:
+        relative /= mean_relative
+    return {
+        "phase_bin_edges_rad": edges,
+        "phase_bin_centers_rad": centers,
+        "occupancy_counts": occupancy,
+        "spike_phase_counts": spike_counts,
+        "relative_spike_probability": relative,
+        "theta_excitable_rad": float(centers[int(np.nanargmax(relative))]),
+        "n_spikes_sampled": int(n_spikes),
+    }
+
+
+def detect_phase_crossings(
+    u: np.ndarray,
+    time_s: np.ndarray,
+    theta_target_rad: float,
+    *,
+    start_s: float | None = None,
+    stop_s: float | None = None,
+    direction: int = 1,
+) -> list[np.ndarray]:
+    """Return interpolated preferred-phase crossing times for each channel."""
+    u = np.asarray(u)
+    time_s = np.asarray(time_s, dtype=np.float64)
+    if u.ndim != 2 or time_s.shape != (u.shape[0],):
+        raise ValueError("u and time_s must have shapes (n_samples, n_channels) and (n_samples,)")
+    if time_s.size < 2 or np.any(np.diff(time_s) <= 0):
+        raise ValueError("time_s must contain at least two strictly increasing values")
+    if direction not in {-1, 0, 1}:
+        raise ValueError("direction must be -1, 0, or 1")
+    keep_start = float(time_s[0] if start_s is None else start_s)
+    keep_stop = float(time_s[-1] if stop_s is None else stop_s)
+    theta = np.unwrap(np.angle(u), axis=0)
+    crossings: list[np.ndarray] = []
+    for channel_idx in range(theta.shape[1]):
+        values = theta[:, channel_idx]
+        channel_crossings = []
+        for sample_idx in range(values.size - 1):
+            a = float(values[sample_idx])
+            b = float(values[sample_idx + 1])
+            if not np.isfinite(a) or not np.isfinite(b) or np.isclose(a, b):
+                continue
+            delta = b - a
+            if direction > 0 and delta <= 0:
+                continue
+            if direction < 0 and delta >= 0:
+                continue
+            low, high = sorted((a, b))
+            n_min = int(np.ceil((low - float(theta_target_rad)) / (2.0 * np.pi)))
+            n_max = int(np.floor((high - float(theta_target_rad)) / (2.0 * np.pi)))
+            for cycle_idx in range(n_min, n_max + 1):
+                level = float(theta_target_rad) + 2.0 * np.pi * cycle_idx
+                fraction = (level - a) / delta
+                if 0.0 <= fraction <= 1.0:
+                    crossing = float(time_s[sample_idx] + fraction * (time_s[sample_idx + 1] - time_s[sample_idx]))
+                    if keep_start <= crossing <= keep_stop:
+                        channel_crossings.append(crossing)
+        crossings.append(np.asarray(channel_crossings, dtype=np.float64))
+    return crossings
+
+
+def select_coherent_phase_front(
+    crossings_by_channel: list[np.ndarray],
+    anchor_time_s: float,
+    *,
+    frequency_hz: float = 45.0,
+    match_max_ms: float = 8.0,
+    min_electrodes: int = 50,
+    search_pre_ms: float = 20.0,
+    search_post_ms: float = 40.0,
+) -> dict[str, np.ndarray | float | int]:
+    """Choose the recurrent crossing front nearest an event anchor."""
+    if frequency_hz <= 0:
+        raise ValueError("frequency_hz must be positive")
+    tolerance_s = float(match_max_ms) / 1000.0
+    if tolerance_s <= 0:
+        raise ValueError("match_max_ms must be positive")
+    period_s = 1.0 / float(frequency_hz)
+    search_start = float(anchor_time_s) - float(search_pre_ms) / 1000.0
+    search_stop = float(anchor_time_s) + float(search_post_ms) / 1000.0
+    first_offset = int(np.floor((search_start - float(anchor_time_s)) / period_s))
+    last_offset = int(np.ceil((search_stop - float(anchor_time_s)) / period_s))
+    candidates = []
+    for cycle_offset in range(first_offset, last_offset + 1):
+        center = float(anchor_time_s) + cycle_offset * period_s
+        arrivals = np.full(len(crossings_by_channel), np.nan, dtype=np.float64)
+        for channel_idx, channel_crossings in enumerate(crossings_by_channel):
+            values = np.asarray(channel_crossings, dtype=np.float64)
+            if values.size == 0:
+                continue
+            nearest_idx = int(np.argmin(np.abs(values - center)))
+            if abs(float(values[nearest_idx]) - center) <= tolerance_s:
+                arrivals[channel_idx] = float(values[nearest_idx])
+        for _ in range(2):
+            finite = np.isfinite(arrivals)
+            if not np.any(finite):
+                break
+            center = float(np.nanmedian(arrivals))
+            for channel_idx, channel_crossings in enumerate(crossings_by_channel):
+                values = np.asarray(channel_crossings, dtype=np.float64)
+                if values.size == 0:
+                    arrivals[channel_idx] = np.nan
+                    continue
+                nearest_idx = int(np.argmin(np.abs(values - center)))
+                nearest = float(values[nearest_idx])
+                arrivals[channel_idx] = nearest if abs(nearest - center) <= tolerance_s else np.nan
+        n_electrodes = int(np.count_nonzero(np.isfinite(arrivals)))
+        if n_electrodes:
+            candidates.append((abs(center - float(anchor_time_s)), -n_electrodes, center, cycle_offset, arrivals))
+    if not candidates:
+        return {
+            "arrival_time_s": np.full(len(crossings_by_channel), np.nan, dtype=np.float64),
+            "front_time_s": np.nan,
+            "cycle_offset": 0,
+            "n_electrodes": 0,
+            "valid": 0,
+        }
+    _, neg_n, center, cycle_offset, arrivals = min(candidates, key=lambda item: (item[0], item[1]))
+    n_electrodes = int(-neg_n)
+    return {
+        "arrival_time_s": arrivals,
+        "front_time_s": float(center),
+        "cycle_offset": int(cycle_offset),
+        "n_electrodes": n_electrodes,
+        "valid": int(n_electrodes >= int(min_electrodes)),
+    }
+
+
+def fit_local_arrival_velocity(
+    arrival_time_s: np.ndarray,
+    coords_mm: np.ndarray,
+    neighborhoods: dict[str, object],
+    *,
+    match_max_ms: float = 8.0,
+    min_neighbors: int = 8,
+    max_residual_ms: float = 4.0,
+    min_arrival_span_ms: float = 0.25,
+) -> dict[str, np.ndarray]:
+    """Fit local arrival-time planes and derive normal front velocity fields."""
+    arrival_time_s = np.asarray(arrival_time_s, dtype=np.float64)
+    coords_mm = np.asarray(coords_mm, dtype=np.float64)
+    if coords_mm.shape != (arrival_time_s.size, 2):
+        raise ValueError("coords_mm must have shape (n_channels, 2)")
+    neighborhood_indices = neighborhoods.get("indices")
+    neighborhood_valid = np.asarray(neighborhoods.get("valid"), dtype=bool)
+    if not isinstance(neighborhood_indices, list) or neighborhood_valid.shape != arrival_time_s.shape:
+        raise ValueError("neighborhoods must come from make_local_phase_neighborhoods")
+
+    n_channels = arrival_time_s.size
+    ax = np.full(n_channels, np.nan, dtype=np.float64)
+    ay = np.full(n_channels, np.nan, dtype=np.float64)
+    residual_ms = np.full(n_channels, np.nan, dtype=np.float64)
+    arrival_span_ms = np.full(n_channels, np.nan, dtype=np.float64)
+    speed = np.full(n_channels, np.nan, dtype=np.float64)
+    velocity_x = np.full(n_channels, np.nan, dtype=np.float64)
+    velocity_y = np.full(n_channels, np.nan, dtype=np.float64)
+    n_good = np.zeros(n_channels, dtype=np.int64)
+    tolerance_s = float(match_max_ms) / 1000.0
+    for center_idx in np.flatnonzero(neighborhood_valid & np.isfinite(arrival_time_s)):
+        indices = np.asarray(neighborhood_indices[int(center_idx)], dtype=np.int64)
+        local_times = arrival_time_s[indices]
+        keep = np.isfinite(local_times) & (np.abs(local_times - arrival_time_s[int(center_idx)]) <= tolerance_s)
+        indices = indices[keep]
+        if indices.size < int(min_neighbors) + 1:
+            continue
+        delta_r = coords_mm[indices] - coords_mm[int(center_idx)]
+        design = np.column_stack((delta_r, np.ones(indices.size, dtype=np.float64)))
+        try:
+            params, *_ = np.linalg.lstsq(design, arrival_time_s[indices], rcond=None)
+        except np.linalg.LinAlgError:
+            continue
+        gradient = np.asarray(params[:2], dtype=np.float64)
+        gradient_norm = float(np.linalg.norm(gradient))
+        if not np.isfinite(gradient_norm) or gradient_norm <= 0:
+            continue
+        fitted = design @ params
+        residual = (arrival_time_s[indices] - fitted) * 1000.0
+        ax[int(center_idx)] = gradient[0]
+        ay[int(center_idx)] = gradient[1]
+        residual_ms[int(center_idx)] = float(np.sqrt(np.mean(residual * residual)))
+        arrival_span_ms[int(center_idx)] = float((np.max(arrival_time_s[indices]) - np.min(arrival_time_s[indices])) * 1000.0)
+        speed[int(center_idx)] = 1.0 / gradient_norm
+        velocity_x[int(center_idx)] = gradient[0] / (gradient_norm * gradient_norm)
+        velocity_y[int(center_idx)] = gradient[1] / (gradient_norm * gradient_norm)
+        n_good[int(center_idx)] = int(indices.size)
+    valid = (
+        np.isfinite(speed)
+        & np.isfinite(residual_ms)
+        & (residual_ms <= float(max_residual_ms))
+        & np.isfinite(arrival_span_ms)
+        & (arrival_span_ms >= float(min_arrival_span_ms))
+        & (n_good >= int(min_neighbors) + 1)
+    )
+    return {
+        "arrival_gradient_x_s_per_mm": ax,
+        "arrival_gradient_y_s_per_mm": ay,
+        "velocity_x_mm_per_s": velocity_x,
+        "velocity_y_mm_per_s": velocity_y,
+        "speed_mm_per_s": speed,
+        "residual_rms_ms": residual_ms,
+        "arrival_span_ms": arrival_span_ms,
+        "n_good": n_good,
+        "valid": valid,
+    }
+
+
+def fit_arrival_time_plane(arrival_time_s: np.ndarray, coords_mm: np.ndarray) -> dict[str, float | int]:
+    """Fit one event-level planar arrival-time surface."""
+    arrival_time_s = np.asarray(arrival_time_s, dtype=np.float64)
+    coords_mm = np.asarray(coords_mm, dtype=np.float64)
+    finite = np.isfinite(arrival_time_s) & np.isfinite(coords_mm).all(axis=1)
+    if np.count_nonzero(finite) < 3:
+        return {
+            "planar_speed_mm_per_s": np.nan,
+            "planar_velocity_x_mm_per_s": np.nan,
+            "planar_velocity_y_mm_per_s": np.nan,
+            "planar_gradient_x_s_per_mm": np.nan,
+            "planar_gradient_y_s_per_mm": np.nan,
+            "planar_intercept_s": np.nan,
+            "planar_residual_rms_ms": np.nan,
+            "planar_n_good": int(np.count_nonzero(finite)),
+        }
+    design = np.column_stack((coords_mm[finite], np.ones(np.count_nonzero(finite))))
+    params, *_ = np.linalg.lstsq(design, arrival_time_s[finite], rcond=None)
+    gradient = params[:2]
+    norm = float(np.linalg.norm(gradient))
+    fitted = design @ params
+    residual = (arrival_time_s[finite] - fitted) * 1000.0
+    return {
+        "planar_speed_mm_per_s": float(1.0 / norm) if norm > 0 else np.nan,
+        "planar_velocity_x_mm_per_s": float(gradient[0] / (norm * norm)) if norm > 0 else np.nan,
+        "planar_velocity_y_mm_per_s": float(gradient[1] / (norm * norm)) if norm > 0 else np.nan,
+        "planar_gradient_x_s_per_mm": float(gradient[0]),
+        "planar_gradient_y_s_per_mm": float(gradient[1]),
+        "planar_intercept_s": float(params[2]),
+        "planar_residual_rms_ms": float(np.sqrt(np.mean(residual * residual))),
+        "planar_n_good": int(np.count_nonzero(finite)),
+    }
+
+
+def fit_arrival_time_radial(
+    arrival_time_s: np.ndarray,
+    coords_mm: np.ndarray,
+    *,
+    center_grid_n: int = 15,
+) -> dict[str, float | int]:
+    """Fit one event-level radial arrival-time surface over on-array centers."""
+    arrival_time_s = np.asarray(arrival_time_s, dtype=np.float64)
+    coords_mm = np.asarray(coords_mm, dtype=np.float64)
+    finite = np.isfinite(arrival_time_s) & np.isfinite(coords_mm).all(axis=1)
+    if np.count_nonzero(finite) < 3:
+        return {
+            "radial_x0_mm": np.nan,
+            "radial_y0_mm": np.nan,
+            "radial_speed_mm_per_s": np.nan,
+            "radial_sign": 0,
+            "radial_slope_s_per_mm": np.nan,
+            "radial_intercept_s": np.nan,
+            "radial_residual_rms_ms": np.nan,
+            "radial_n_good": int(np.count_nonzero(finite)),
+        }
+    coords = coords_mm[finite]
+    times = arrival_time_s[finite]
+    x_grid = np.linspace(np.min(coords[:, 0]), np.max(coords[:, 0]), int(center_grid_n))
+    y_grid = np.linspace(np.min(coords[:, 1]), np.max(coords[:, 1]), int(center_grid_n))
+    best = None
+    for x0 in x_grid:
+        for y0 in y_grid:
+            distance = np.linalg.norm(coords - np.array([x0, y0]), axis=1)
+            design = np.column_stack((distance, np.ones(distance.size)))
+            params, *_ = np.linalg.lstsq(design, times, rcond=None)
+            residual = times - design @ params
+            rss = float(np.sum(residual * residual))
+            if best is None or rss < best[0]:
+                best = (rss, float(x0), float(y0), float(params[0]), residual)
+    _, x0, y0, slope, residual = best
+    return {
+        "radial_x0_mm": x0,
+        "radial_y0_mm": y0,
+        "radial_speed_mm_per_s": float(1.0 / abs(slope)) if slope != 0 else np.nan,
+        "radial_sign": int(np.sign(slope)),
+        "radial_slope_s_per_mm": float(slope),
+        "radial_intercept_s": float(times.mean() - slope * np.linalg.norm(coords - np.array([x0, y0]), axis=1).mean()),
+        "radial_residual_rms_ms": float(np.sqrt(np.mean((residual * 1000.0) ** 2))),
+        "radial_n_good": int(np.count_nonzero(finite)),
+    }
+
+
+def analyze_excitable_phase_front(
+    u: np.ndarray,
+    time_s: np.ndarray,
+    coords_mm: np.ndarray,
+    neighborhoods: dict[str, object],
+    *,
+    theta_excitable_rad: float,
+    anchor_time_s: float,
+    frequency_hz: float = 45.0,
+    match_max_ms: float = 8.0,
+    min_electrodes: int = 50,
+    search_pre_ms: float = 20.0,
+    search_post_ms: float = 40.0,
+    min_neighbors: int = 8,
+    max_residual_ms: float = 4.0,
+    min_arrival_span_ms: float = 0.25,
+    radial_center_grid_n: int = 15,
+) -> dict[str, object]:
+    """Analyze one event's preferred-phase crossing front."""
+    crossings = detect_phase_crossings(
+        u,
+        time_s,
+        theta_excitable_rad,
+        start_s=float(anchor_time_s) - float(search_pre_ms) / 1000.0,
+        stop_s=float(anchor_time_s) + float(search_post_ms) / 1000.0,
+    )
+    front = select_coherent_phase_front(
+        crossings,
+        anchor_time_s,
+        frequency_hz=frequency_hz,
+        match_max_ms=match_max_ms,
+        min_electrodes=min_electrodes,
+        search_pre_ms=search_pre_ms,
+        search_post_ms=search_post_ms,
+    )
+    arrival_time_s = np.asarray(front["arrival_time_s"], dtype=np.float64)
+    local = fit_local_arrival_velocity(
+        arrival_time_s,
+        coords_mm,
+        neighborhoods,
+        match_max_ms=match_max_ms,
+        min_neighbors=min_neighbors,
+        max_residual_ms=max_residual_ms,
+        min_arrival_span_ms=min_arrival_span_ms,
+    )
+    return {
+        "crossings_by_channel": crossings,
+        "front": front,
+        "local": local,
+        "planar": fit_arrival_time_plane(arrival_time_s, coords_mm),
+        "radial": fit_arrival_time_radial(arrival_time_s, coords_mm, center_grid_n=radial_center_grid_n),
+    }
+
+
+def initialize_wavefront_cache(
+    path: str | Path,
+    calibration: dict[str, np.ndarray | float | int],
+    *,
+    config: dict[str, object] | None = None,
+) -> None:
+    """Create a wavefront HDF5 cache with calibration and appendable result groups."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as h5:
+        calibration_group = h5.create_group("wavefront_calibration")
+        for key, value in calibration.items():
+            if np.isscalar(value):
+                calibration_group.attrs[key] = value
+            else:
+                calibration_group.create_dataset(key, data=np.asarray(value))
+        if config is not None:
+            calibration_group.attrs["config"] = json.dumps(config, sort_keys=True)
+        h5.create_group("wavefront_events")
+        h5.create_group("wavefront_local")
+
+
+def append_wavefront_rows(path: str | Path, group_name: str, rows: dict[str, np.ndarray] | list[dict[str, object]]) -> None:
+    """Append column-oriented or record-oriented rows to one wavefront cache group."""
+    if isinstance(rows, list):
+        if not rows:
+            return
+        rows = {key: np.asarray([row[key] for row in rows]) for key in rows[0]}
+    else:
+        rows = {key: np.asarray(value) for key, value in rows.items()}
+    if not rows:
+        return
+    lengths = {value.shape[0] if value.ndim else 1 for value in rows.values()}
+    if len(lengths) != 1:
+        raise ValueError("All appended wavefront columns must have matching lengths")
+    n_rows = int(next(iter(lengths)))
+    with h5py.File(path, "a") as h5:
+        group = h5.require_group(str(group_name).strip("/"))
+        if group.keys() and set(group.keys()) != set(rows):
+            raise ValueError("Appended wavefront columns must match the existing cache schema")
+        existing = {dataset.shape[0] for dataset in group.values()}
+        old_size = int(next(iter(existing))) if existing else 0
+        if existing and len(existing) != 1:
+            raise ValueError("Existing wavefront cache columns have inconsistent lengths")
+        for key, values in rows.items():
+            values = np.atleast_1d(values)
+            if key not in group:
+                dataset = group.create_dataset(key, shape=(old_size,), maxshape=(None,), dtype=values.dtype, chunks=True)
+            else:
+                dataset = group[key]
+            dataset.resize((old_size + n_rows,))
+            dataset[old_size:] = values
+
+
+def read_wavefront_cache(path: str | Path) -> dict[str, dict[str, object]]:
+    """Read wavefront calibration and result groups from HDF5."""
+    result: dict[str, dict[str, object]] = {}
+    with h5py.File(path, "r") as h5:
+        for group_name in ("wavefront_calibration", "wavefront_events", "wavefront_local"):
+            if group_name not in h5:
+                continue
+            group = h5[group_name]
+            payload: dict[str, object] = {key: dataset[:] for key, dataset in group.items()}
+            payload.update({key: value for key, value in group.attrs.items()})
+            result[group_name] = payload
+    return result
 
 
 def fit_pgd_plane(
