@@ -74,7 +74,7 @@ def draw_population_ifr_summary(
         cmap=COLORMAPS["heatmap"],
         norm=LogNorm(vmin=vmin, vmax=vmax),
     )
-    ax_heatmap.set_ylabel("Selected electrode rank")
+    ax_heatmap.set_ylabel("Electrode index")
     ax_heatmap.set_yticks([1, population.ifr_matrix.shape[0]])
     if show_titles and heatmap_title:
         ax_heatmap.set_title(heatmap_title)
@@ -94,11 +94,11 @@ def draw_population_ifr_summary(
         ax_mean.plot(population.time_grid, np.clip(population.mean_ifr, floor, None), color="0.70", lw=LINE_WIDTHS["thin"], label="Population mean IFR")
         ax_mean.plot(population.time_grid, np.clip(population.mean_ifr_smooth, floor, None), color="black", lw=LINE_WIDTHS["emphasis"], label=smooth_label)
         ax_mean.set_yscale("log")
-        ax_mean.set_ylabel("Hz (log scale)")
+        ax_mean.set_ylabel("Mean IFR (Hz))")
     else:
         ax_mean.plot(population.time_grid, population.mean_ifr, color="0.70", lw=LINE_WIDTHS["thin"], label="Population mean IFR")
         ax_mean.plot(population.time_grid, population.mean_ifr_smooth, color="black", lw=LINE_WIDTHS["emphasis"], label=smooth_label)
-        ax_mean.set_ylabel("Hz")
+        ax_mean.set_ylabel("Mean IFR (Hz)")
     ax_mean.set_xlabel(UNIT_LABELS["time_s"])
     if show_titles and mean_title:
         ax_mean.set_title(mean_title)
@@ -227,7 +227,7 @@ def draw_activity_state_ifr_kde_histograms(
                 ax.text(
                     float(peak_hz),
                     float(peak_counts),
-                    f"{peak_hz:.2f}",
+                    f"{peak_hz:.1f}",
                     fontsize=FONT_SIZES["small"],
                     ha="left",
                     va="bottom",
@@ -241,7 +241,7 @@ def draw_activity_state_ifr_kde_histograms(
             ax.set_xlabel("")
             ax.tick_params(axis="x", which="both", labelbottom=False)
         else:
-            ax.set_xlabel("Instantaneous firing rate (Hz)")
+            ax.set_xlabel("IFR (Hz)")
         ax.set_ylabel("Count")
         if compact:
             ax.set_title(state_labels.get(state, state), pad=2.0)
@@ -373,8 +373,8 @@ def draw_electrode_peak_time_map(
         ax.set_xlabel("")
         ax.set_ylabel("")
     else:
-        ax.set_xlabel("x (um)")
-        ax.set_ylabel("y (um)")
+        ax.set_xlabel("x ($\\mu m$)")
+        ax.set_ylabel("y ($\\mu m$)")
     if title:
         ax.set_title(title)
 
@@ -651,7 +651,7 @@ def draw_high_activity_burst_windows(
         ax.plot(time_grid[mask], np.clip(mean_ifr[mask], floor, None), color="black", lw=LINE_WIDTHS["base"], label="Population mean IFR" if panel_idx == 0 else None)
         ax.plot(time_grid[mask], np.clip(mean_ifr_smooth[mask], floor, None), color="0.5", lw=LINE_WIDTHS["thin"], label="Smoothed population IFR" if panel_idx == 0 else None)
         ax.set_yscale("log")
-        ax.set_ylabel("Hz")
+        ax.set_ylabel("Mean IFR (Hz)")
         ax.set_xlim(start_s, stop_s)
 
         _shade_epochs(
@@ -688,7 +688,7 @@ def draw_high_activity_burst_windows(
         if np.any(state_mask):
             ymax = max(ymax, min(1.0, float(network_activity.participation_fraction[state_mask].max()) * 1.20))
         ax2.set_ylim(0.0, ymax)
-        ax2.set_ylabel("" if compact else "Participation")
+        ax2.set_ylabel("" if compact else "Participation proportion")
         ax2.yaxis.label.set_color(participation_color)
         ax2.tick_params(axis="y", colors=participation_color)
         ax2.spines["right"].set_color(participation_color)

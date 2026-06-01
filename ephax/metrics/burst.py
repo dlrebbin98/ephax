@@ -374,7 +374,7 @@ def build_network_activity_state(
     )
 
     per_electrode_rate_hz = rate_blocks.mean(axis=2)
-    spike_counts = spike_blocks.sum(axis=2).astype(int)
+    spike_counts = spike_blocks.sum(axis=2, dtype=np.int32)
     bin_edges_s = highres.bin_edges_s[: trim_stop + 1 : bins_per_aggregate]
     if len(bin_edges_s) == n_bins:
         bin_edges_s = np.append(bin_edges_s, highres.bin_edges_s[trim_stop])
@@ -440,7 +440,7 @@ def build_participation_activity_state(
     )
 
     per_electrode_rate_hz = rate_blocks.mean(axis=2)
-    spike_counts = spike_blocks.sum(axis=2).astype(int)
+    spike_counts = spike_blocks.sum(axis=2, dtype=np.int32)
     active_mask = spike_counts > 0
     bin_edges_s = highres.bin_edges_s[: trim_stop + 1 : bins_per_aggregate]
     if len(bin_edges_s) == n_bins:
@@ -781,11 +781,12 @@ def build_highres_traces(
     spike_times = np.asarray(recording.spikes["time"], dtype=float)
     spike_electrodes = np.asarray(recording.spikes["electrode"], dtype=int)
 
-    per_electrode_rate_hz = []
-    spike_presence = []
+    electrodes = np.asarray(selected_electrodes, dtype=int)
+    per_electrode_rate_hz = np.empty((len(electrodes), len(time_centers)), dtype=np.float32)
+    spike_presence = np.empty((len(electrodes), len(time_centers)), dtype=bool)
     spikes_by_electrode: dict[int, np.ndarray] = {}
     sigma_bins = float(smooth_sigma_ms) / float(bin_ms)
-    for electrode in np.asarray(selected_electrodes, dtype=int):
+    for row_idx, electrode in enumerate(electrodes):
         electrode = int(electrode)
         electrode_times = np.sort(
             spike_times[
@@ -797,18 +798,22 @@ def build_highres_traces(
         spikes_by_electrode[electrode] = electrode_times
 
         counts, _ = np.histogram(electrode_times, bins=bin_edges)
-        rate_hz = counts.astype(float) / dt
-        per_electrode_rate_hz.append(gaussian_filter1d(rate_hz, sigma=sigma_bins, mode="nearest"))
-        spike_presence.append(counts > 0)
+        rate_hz = counts.astype(np.float32)
+        rate_hz /= np.float32(dt)
+        per_electrode_rate_hz[row_idx] = gaussian_filter1d(
+            rate_hz,
+            sigma=sigma_bins,
+            mode="nearest",
+            output=np.float32,
+        )
+        spike_presence[row_idx] = counts > 0
 
-    per_electrode_rate_hz = np.asarray(per_electrode_rate_hz, dtype=float)
-    spike_presence = np.asarray(spike_presence, dtype=bool)
     population_rate_hz = per_electrode_rate_hz.mean(axis=0)
 
     return HighResTraces(
         bin_edges_s=bin_edges,
         time_centers_s=time_centers,
-        electrodes=np.asarray(selected_electrodes, dtype=int),
+        electrodes=electrodes,
         per_electrode_rate_hz=per_electrode_rate_hz,
         population_rate_hz=population_rate_hz,
         spikes_by_electrode=spikes_by_electrode,

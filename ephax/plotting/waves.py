@@ -60,12 +60,12 @@ def draw_wave_timing_panel(
     y_line = float(fit["slope_ms_per_um"]) * x_line + float(fit["intercept_ms"])
     ax.plot(x_line, y_line, color="crimson", ls="--", lw=LINE_WIDTHS["emphasis"], label="Linear fit")
     ax.set_xlim(0.0, array_width_um)
-    ax.set_xlabel("Distance from inferred origin side (um)")
+    ax.set_xlabel("Distance from inferred origin side ($\\mu m$)")
     ax.set_ylabel("Peak time relative to event peak (ms)")
     counts = directions["event_direction"].value_counts().reindex(["left_to_right", "right_to_left"], fill_value=0)
     if title is None and not compact:
         title = (
-            f"Wave-peak timing, speed ~ {float(fit['implied_speed_um_per_ms']):.0f} um/ms "
+            f"Wave-peak timing, speed ~ {float(fit['implied_speed_um_per_ms']):.0f} $\\mu m$/ms "
             f"(L->R {int(counts['left_to_right'])}, R->L {int(counts['right_to_left'])})"
         )
     if title:
@@ -106,18 +106,12 @@ def draw_wave_bootstrap_panel(
         boot_mean = float(fit["bootstrap_speed_mean_um_per_ms"])
         ci_low = float(fit["bootstrap_speed_ci_low_um_per_ms"])
         ci_high = float(fit["bootstrap_speed_ci_high_um_per_ms"])
-        artists["fit_line"] = ax.axvline(
-            fit_speed,
-            color="crimson",
-            lw=LINE_WIDTHS["emphasis"],
-            label=f"Fit {fit_speed:.0f} um/ms",
-        )
         artists["mean_line"] = ax.axvline(
             boot_mean,
-            color="black",
+            color="crimson",
             lw=LINE_WIDTHS["base"],
             ls="--",
-            label=f"Mean {boot_mean:.0f} um/ms",
+            label=f"Mean {boot_mean:.0f} $\\mu m$/ms",
         )
         artists["ci_span"] = ax.axvspan(
             ci_low,
@@ -137,7 +131,7 @@ def draw_wave_bootstrap_panel(
             va="center",
             transform=ax.transAxes,
         )
-    ax.set_xlabel("Implied propagation speed (um/ms)")
+    ax.set_xlabel("Implied propagation speed ($\\mu m$/ms)")
     ax.set_ylabel("Bootstrap count")
     if title:
         ax.set_title(title)

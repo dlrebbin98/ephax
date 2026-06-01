@@ -220,6 +220,8 @@ def test_burst_metrics_extract_notebook_core_path():
     x_layout, x_rate = order_aligned_rate_by_x(aligned, rec.layout, summary)
 
     assert population.ifr_matrix.shape[0] == 3
+    assert highres.per_electrode_rate_hz.dtype == np.float32
+    assert highres.spike_presence.dtype == bool
     assert len(coarse_epochs) >= 1
     assert raw_peaks.size >= 1
     assert len(anchors) >= 1
@@ -383,6 +385,7 @@ def test_high_activity_participation_detector_nests_bursts_and_anchors_at_max_pa
     refined = refine_participation_burst_anchors(highres, bursts, anchor_window_ms=50.0)
 
     assert info["threshold_hz"] > info["baseline_hz"]
+    assert participation.spike_counts.dtype == np.int32
     assert len(high_epochs) >= 1
     assert len(bursts) >= 1
     assert "anchor_time_s" in bursts

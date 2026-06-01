@@ -29,7 +29,7 @@ def draw_grid_avghz_panel(
     compact: bool = False,
     show_legend: bool | None = None,
     show_colorbar: bool | None = True,
-    colorbar_label: str = "Average firing rate (Hz)",
+    colorbar_label: str = "Mean IFR (Hz)",
 ):
     """Draw multiple precomputed layout-grid average firing-rate results into axes."""
     results = list(results)
