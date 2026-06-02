@@ -305,6 +305,331 @@ def extract_phasors(data_band_ds: np.ndarray, *, eps: float = 1e-12) -> tuple[np
     return u, amp
 
 
+def _dmd_rank(singular_values: np.ndarray, energy_fraction: float, max_rank: int) -> tuple[int, np.ndarray]:
+    """Choose a truncated SVD rank from cumulative snapshot energy."""
+    singular_values = np.asarray(singular_values, dtype=np.float64)
+    if singular_values.ndim != 1 or singular_values.size == 0:
+        raise ValueError("singular_values must be a non-empty vector")
+    if not (0.0 < float(energy_fraction) <= 1.0):
+        raise ValueError("energy_fraction must satisfy 0 < energy_fraction <= 1")
+    if int(max_rank) < 1:
+        raise ValueError("max_rank must be positive")
+    energy = singular_values**2
+    total = float(np.sum(energy))
+    cumulative = np.cumsum(energy) / total if total > 0 else np.zeros_like(energy)
+    numerical_rank = int(np.count_nonzero(singular_values > np.finfo(float).eps * singular_values[0] * singular_values.size))
+    if numerical_rank == 0:
+        return 0, cumulative
+    requested = int(np.searchsorted(cumulative, float(energy_fraction), side="left") + 1)
+    return min(requested, numerical_rank, int(max_rank)), cumulative
+
+
+def compute_exact_dmd(
+    samples: np.ndarray,
+    dt_s: float,
+    *,
+    energy_fraction: float = 0.99,
+    max_rank: int = 30,
+) -> dict[str, np.ndarray | float | int | bool]:
+    """Compute truncated exact DMD for samples shaped ``(time, channels)``.
+
+    ``reconstruction_contribution`` is a ranking proxy based on the fitted
+    initial amplitude, spatial-mode norm, and finite excerpt duration. It is
+    not a physical energy estimate.
+    """
+    samples = np.asarray(samples)
+    if samples.ndim != 2:
+        raise ValueError("samples must have shape (time, channels)")
+    if samples.shape[0] < 3 or samples.shape[1] < 1:
+        raise ValueError("DMD requires at least three samples and one channel")
+    if not np.isfinite(float(dt_s)) or float(dt_s) <= 0:
+        raise ValueError("dt_s must be positive")
+    clean = np.nan_to_num(samples)
+    x = clean[:-1].T
+    y = clean[1:].T
+    u, singular_values, vh = np.linalg.svd(x, full_matrices=False)
+    rank, cumulative_energy = _dmd_rank(singular_values, energy_fraction, max_rank)
+    if rank == 0:
+        return {
+            "eigenvalues": np.empty(0, dtype=np.complex128),
+            "frequency_hz": np.empty(0, dtype=np.float64),
+            "growth_rate_per_s": np.empty(0, dtype=np.float64),
+            "amplitudes": np.empty(0, dtype=np.complex128),
+            "reconstruction_contribution": np.empty(0, dtype=np.float64),
+            "contribution_fraction": np.empty(0, dtype=np.float64),
+            "modes": np.empty((samples.shape[1], 0), dtype=np.complex128),
+            "singular_values": singular_values,
+            "cumulative_energy": cumulative_energy,
+            "retained_rank": 0,
+            "rank_cap_bound": False,
+        }
+    ur = u[:, :rank]
+    sr = singular_values[:rank]
+    vr = vh[:rank].conj().T
+    a_tilde = (ur.conj().T @ y @ vr) / sr[None, :]
+    eigenvalues, eigenvectors = np.linalg.eig(a_tilde)
+    modes = ((y @ vr) / sr[None, :]) @ eigenvectors
+    amplitudes = np.linalg.lstsq(modes, x[:, 0], rcond=None)[0]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        continuous = np.log(eigenvalues) / float(dt_s)
+    frequency_hz = np.imag(continuous) / (2.0 * np.pi)
+    growth_rate = np.real(continuous)
+    powers = np.arange(x.shape[1], dtype=np.float64)
+    log_abs_eigenvalue = np.log(np.maximum(np.abs(eigenvalues), np.finfo(float).tiny))
+    temporal_exponents = 2.0 * log_abs_eigenvalue[:, None] * powers[None, :]
+    max_temporal_exponent = np.max(temporal_exponents, axis=1)
+    log_temporal_norm = 0.5 * (
+        max_temporal_exponent + np.log(np.sum(np.exp(temporal_exponents - max_temporal_exponent[:, None]), axis=1))
+    )
+    log_contribution = (
+        np.log(np.maximum(np.abs(amplitudes), np.finfo(float).tiny))
+        + np.log(np.maximum(np.linalg.norm(modes, axis=0), np.finfo(float).tiny))
+        + log_temporal_norm
+    )
+    finite_log_contribution = np.isfinite(log_contribution)
+    contribution_fraction = np.zeros_like(log_contribution)
+    contribution = np.zeros_like(log_contribution)
+    if np.any(finite_log_contribution):
+        offset = float(np.max(log_contribution[finite_log_contribution]))
+        scaled = np.exp(np.clip(log_contribution[finite_log_contribution] - offset, -700.0, 0.0))
+        contribution_fraction[finite_log_contribution] = scaled / np.sum(scaled)
+        contribution[finite_log_contribution] = np.exp(np.clip(log_contribution[finite_log_contribution], -700.0, 700.0))
+    return {
+        "eigenvalues": eigenvalues,
+        "frequency_hz": frequency_hz,
+        "growth_rate_per_s": growth_rate,
+        "amplitudes": amplitudes,
+        "reconstruction_contribution": contribution,
+        "contribution_fraction": contribution_fraction,
+        "modes": modes,
+        "singular_values": singular_values,
+        "cumulative_energy": cumulative_energy,
+        "retained_rank": int(rank),
+        "rank_cap_bound": bool(rank == int(max_rank) and rank < singular_values.size and cumulative_energy[rank - 1] < float(energy_fraction)),
+    }
+
+
+def compute_hankel_dmd(
+    samples: np.ndarray,
+    dt_s: float,
+    *,
+    n_delays: int = 20,
+    energy_fraction: float = 0.99,
+    max_rank: int = 30,
+) -> dict[str, np.ndarray | float | int | bool]:
+    """Compute delay-embedded DMD and expose the first delay block as a spatial mode."""
+    samples = np.asarray(samples)
+    if samples.ndim != 2:
+        raise ValueError("samples must have shape (time, channels)")
+    if int(n_delays) < 2 or int(n_delays) > samples.shape[0] - 2:
+        raise ValueError("n_delays must satisfy 2 <= n_delays <= n_time - 2")
+    n_delays = int(n_delays)
+    lifted = np.concatenate([samples[offset : samples.shape[0] - n_delays + offset + 1] for offset in range(n_delays)], axis=1)
+    result = compute_exact_dmd(lifted, dt_s, energy_fraction=energy_fraction, max_rank=max_rank)
+    result["modes"] = np.asarray(result["modes"])[: samples.shape[1]]
+    result["n_delays"] = n_delays
+    result["lifted_state_dimension"] = int(samples.shape[1] * n_delays)
+    return result
+
+
+def centered_excerpt_bounds(
+    anchor_time_s: float,
+    context_s: float,
+    *,
+    recording_start_s: float = 0.0,
+    recording_stop_s: float,
+) -> tuple[float, float]:
+    """Return a fixed-duration excerpt around an anchor, shifted inside recording bounds."""
+    duration = float(context_s)
+    start_limit = float(recording_start_s)
+    stop_limit = float(recording_stop_s)
+    if not (duration > 0 and stop_limit > start_limit):
+        raise ValueError("Require positive context_s and recording_stop_s > recording_start_s")
+    if duration > stop_limit - start_limit:
+        raise ValueError("context_s exceeds the available recording duration")
+    start = float(anchor_time_s) - 0.5 * duration
+    start = min(max(start, start_limit), stop_limit - duration)
+    return start, start + duration
+
+
+def select_evenly_spaced_events(events: Iterable[dict[str, object]], max_events: int = 25) -> list[dict[str, object]]:
+    """Select deterministic evenly spaced event records without changing their order."""
+    events = list(events)
+    if int(max_events) < 1:
+        raise ValueError("max_events must be positive")
+    if len(events) <= int(max_events):
+        return events
+    indices = np.linspace(0, len(events) - 1, int(max_events), dtype=int)
+    return [events[int(index)] for index in indices]
+
+
+def run_event_dmd_screen(
+    events: Iterable[dict[str, object]],
+    load_event_samples,
+    coords_mm: np.ndarray,
+    *,
+    electrode_ids: np.ndarray | None = None,
+    dt_s: float = 1.0 / 500.0,
+    energy_fraction: float = 0.99,
+    max_rank: int = 30,
+    hankel_delays: int = 20,
+    store_top_modes: int = 8,
+) -> dict[str, object]:
+    """Run exact and Hankel DMD sequentially for event-wise signal dictionaries."""
+    coords_mm = np.asarray(coords_mm, dtype=np.float64)
+    if coords_mm.ndim != 2 or coords_mm.shape[1] != 2:
+        raise ValueError("coords_mm must have shape (n_channels, 2)")
+    electrode_ids = np.arange(coords_mm.shape[0], dtype=np.int64) if electrode_ids is None else np.asarray(electrode_ids)
+    if electrode_ids.shape != (coords_mm.shape[0],):
+        raise ValueError("electrode_ids must match coords_mm rows")
+    event_rows: list[dict[str, object]] = []
+    mode_rows: list[dict[str, object]] = []
+    singular_rows: list[dict[str, object]] = []
+    stored_modes: list[np.ndarray] = []
+    for event_idx, event in enumerate(events):
+        event = dict(event)
+        signals = load_event_samples(event)
+        event_rows.append({"event_idx": event_idx, **event})
+        for signal_path, samples in signals.items():
+            samples = np.asarray(samples)
+            if samples.shape[1] != coords_mm.shape[0]:
+                raise ValueError("Loaded event channel count does not match coords_mm")
+            for variant, result in (
+                ("exact", compute_exact_dmd(samples, dt_s, energy_fraction=energy_fraction, max_rank=max_rank)),
+                (
+                    "hankel",
+                    compute_hankel_dmd(
+                        samples,
+                        dt_s,
+                        n_delays=hankel_delays,
+                        energy_fraction=energy_fraction,
+                        max_rank=max_rank,
+                    ),
+                ),
+            ):
+                singular_rows.append(
+                    {
+                        "event_idx": event_idx,
+                        "signal_path": signal_path,
+                        "variant": variant,
+                        "retained_rank": int(result["retained_rank"]),
+                        "rank_cap_bound": bool(result["rank_cap_bound"]),
+                        "singular_values": np.asarray(result["singular_values"], dtype=np.float64),
+                        "cumulative_energy": np.asarray(result["cumulative_energy"], dtype=np.float64),
+                    }
+                )
+                contributions = np.asarray(result["contribution_fraction"], dtype=np.float64)
+                top = set(np.argsort(contributions)[::-1][: int(store_top_modes)].tolist())
+                modes = np.asarray(result["modes"])
+                for mode_idx in range(modes.shape[1]):
+                    stored_mode_idx = -1
+                    if mode_idx in top:
+                        stored_mode_idx = len(stored_modes)
+                        stored_modes.append(np.asarray(modes[:, mode_idx], dtype=np.complex64))
+                    eigenvalue = np.asarray(result["eigenvalues"])[mode_idx]
+                    amplitude = np.asarray(result["amplitudes"])[mode_idx]
+                    mode_rows.append(
+                        {
+                            "event_idx": event_idx,
+                            "signal_path": signal_path,
+                            "variant": variant,
+                            "mode_idx": mode_idx,
+                            "eigenvalue_real": float(np.real(eigenvalue)),
+                            "eigenvalue_imag": float(np.imag(eigenvalue)),
+                            "frequency_hz": float(np.asarray(result["frequency_hz"])[mode_idx]),
+                            "growth_rate_per_s": float(np.asarray(result["growth_rate_per_s"])[mode_idx]),
+                            "amplitude_abs": float(np.abs(amplitude)),
+                            "reconstruction_contribution": float(np.asarray(result["reconstruction_contribution"])[mode_idx]),
+                            "contribution_fraction": float(contributions[mode_idx]),
+                            "retained_rank": int(result["retained_rank"]),
+                            "rank_cap_bound": bool(result["rank_cap_bound"]),
+                            "stored_mode_idx": stored_mode_idx,
+                        }
+                    )
+    return {
+        "coords_mm": coords_mm,
+        "electrode_ids": electrode_ids,
+        "events": event_rows,
+        "mode_metrics": mode_rows,
+        "singular_summaries": singular_rows,
+        "spatial_modes": np.asarray(stored_modes, dtype=np.complex64).reshape((-1, coords_mm.shape[0])),
+    }
+
+
+def _write_dmd_table(group: h5py.Group, rows: list[dict[str, object]], *, skip: set[str] | None = None) -> None:
+    skip = set() if skip is None else set(skip)
+    if not rows:
+        return
+    for key in rows[0]:
+        if key in skip:
+            continue
+        values = [row[key] for row in rows]
+        if isinstance(values[0], str):
+            group.create_dataset(key, data=np.asarray(values, dtype=h5py.string_dtype("utf-8")))
+        else:
+            group.create_dataset(key, data=np.asarray(values))
+
+
+def write_dmd_cache(path: str | Path, screen: dict[str, object], *, config: dict[str, object]) -> None:
+    """Write a compact standalone DMD inspection cache."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as h5:
+        h5.attrs["config"] = json.dumps(config, sort_keys=True)
+        h5.create_dataset("coords_mm", data=np.asarray(screen["coords_mm"], dtype=np.float64))
+        h5.create_dataset("electrode_ids", data=np.asarray(screen["electrode_ids"]))
+        modes = np.asarray(screen["spatial_modes"], dtype=np.complex64)
+        h5.create_dataset("spatial_modes_real", data=modes.real.astype(np.float32, copy=False))
+        h5.create_dataset("spatial_modes_imag", data=modes.imag.astype(np.float32, copy=False))
+        _write_dmd_table(h5.create_group("events"), list(screen["events"]))
+        _write_dmd_table(h5.create_group("mode_metrics"), list(screen["mode_metrics"]))
+        singular_group = h5.create_group("singular_summaries")
+        singular_rows = list(screen["singular_summaries"])
+        _write_dmd_table(singular_group, singular_rows, skip={"singular_values", "cumulative_energy"})
+        if singular_rows:
+            width = max(len(row["singular_values"]) for row in singular_rows)
+            for key in ("singular_values", "cumulative_energy"):
+                values = np.full((len(singular_rows), width), np.nan, dtype=np.float64)
+                for row_idx, row in enumerate(singular_rows):
+                    row_values = np.asarray(row[key], dtype=np.float64)
+                    values[row_idx, : row_values.size] = row_values
+                singular_group.create_dataset(key, data=values)
+
+
+def read_dmd_cache(path: str | Path) -> dict[str, object]:
+    """Read a standalone DMD inspection cache."""
+    with h5py.File(path, "r") as h5:
+        result: dict[str, object] = {
+            "config": json.loads(h5.attrs["config"]),
+            "coords_mm": h5["coords_mm"][:],
+            "electrode_ids": h5["electrode_ids"][:],
+            "spatial_modes": h5["spatial_modes_real"][:] + 1j * h5["spatial_modes_imag"][:],
+        }
+        for group_name in ("events", "mode_metrics", "singular_summaries"):
+            group = h5[group_name]
+            payload = {}
+            for key, dataset in group.items():
+                values = dataset[:]
+                if values.dtype.kind in {"S", "O"}:
+                    values = values.astype(str)
+                payload[key] = values
+            result[group_name] = payload
+    return result
+
+
+def dmd_cache_matches(path: str | Path, config: dict[str, object]) -> tuple[bool, str]:
+    """Return whether a DMD cache exists and exactly matches its processing configuration."""
+    path = Path(path)
+    if not path.exists():
+        return False, "missing"
+    try:
+        with h5py.File(path, "r") as h5:
+            cached = json.loads(h5.attrs["config"])
+    except (OSError, KeyError, json.JSONDecodeError) as exc:
+        return False, f"unreadable: {exc}"
+    return (True, "compatible") if cached == config else (False, "configuration differs")
+
+
 def make_k_grid(lambda_min_mm: float, lambda_max_mm: float, n_grid: int = 41) -> dict[str, np.ndarray | float]:
     """Build a square ``kx, ky`` search grid with radial wavelength bounds."""
     if not (0 < lambda_min_mm < lambda_max_mm):
@@ -1070,9 +1395,17 @@ def fit_local_arrival_velocity(
     match_max_ms: float = 8.0,
     min_neighbors: int = 8,
     max_residual_ms: float = 4.0,
-    min_arrival_span_ms: float = 0.25,
+    min_arrival_span_ms: float = 1.0,
+    min_distance_span_mm: float = 0.20,
+    max_speed_mm_per_s: float | None = 500.0,
 ) -> dict[str, np.ndarray]:
-    """Fit local arrival-time planes and derive normal front velocity fields."""
+    """Fit local arrival-time planes and derive resolvable normal front velocities.
+
+    Raw fits are retained even when the inferred speed is faster than the
+    configured resolution ceiling. ``speed_censored`` marks these weak-gradient
+    fits so they can be counted without treating the reciprocal gradient as a
+    precise velocity estimate.
+    """
     arrival_time_s = np.asarray(arrival_time_s, dtype=np.float64)
     coords_mm = np.asarray(coords_mm, dtype=np.float64)
     if coords_mm.shape != (arrival_time_s.size, 2):
@@ -1087,6 +1420,7 @@ def fit_local_arrival_velocity(
     ay = np.full(n_channels, np.nan, dtype=np.float64)
     residual_ms = np.full(n_channels, np.nan, dtype=np.float64)
     arrival_span_ms = np.full(n_channels, np.nan, dtype=np.float64)
+    distance_span_mm = np.full(n_channels, np.nan, dtype=np.float64)
     speed = np.full(n_channels, np.nan, dtype=np.float64)
     velocity_x = np.full(n_channels, np.nan, dtype=np.float64)
     velocity_y = np.full(n_channels, np.nan, dtype=np.float64)
@@ -1115,17 +1449,26 @@ def fit_local_arrival_velocity(
         ay[int(center_idx)] = gradient[1]
         residual_ms[int(center_idx)] = float(np.sqrt(np.mean(residual * residual)))
         arrival_span_ms[int(center_idx)] = float((np.max(arrival_time_s[indices]) - np.min(arrival_time_s[indices])) * 1000.0)
+        pairwise_distance = np.linalg.norm(delta_r[:, None, :] - delta_r[None, :, :], axis=2)
+        distance_span_mm[int(center_idx)] = float(np.nanmax(pairwise_distance))
         speed[int(center_idx)] = 1.0 / gradient_norm
         velocity_x[int(center_idx)] = gradient[0] / (gradient_norm * gradient_norm)
         velocity_y[int(center_idx)] = gradient[1] / (gradient_norm * gradient_norm)
         n_good[int(center_idx)] = int(indices.size)
+    gradient_norm = np.hypot(ax, ay)
+    speed_censored = np.zeros(n_channels, dtype=bool)
+    if max_speed_mm_per_s is not None:
+        speed_censored = np.isfinite(speed) & (speed > float(max_speed_mm_per_s))
     valid = (
         np.isfinite(speed)
         & np.isfinite(residual_ms)
         & (residual_ms <= float(max_residual_ms))
         & np.isfinite(arrival_span_ms)
         & (arrival_span_ms >= float(min_arrival_span_ms))
+        & np.isfinite(distance_span_mm)
+        & (distance_span_mm >= float(min_distance_span_mm))
         & (n_good >= int(min_neighbors) + 1)
+        & ~speed_censored
     )
     return {
         "arrival_gradient_x_s_per_mm": ax,
@@ -1135,6 +1478,9 @@ def fit_local_arrival_velocity(
         "speed_mm_per_s": speed,
         "residual_rms_ms": residual_ms,
         "arrival_span_ms": arrival_span_ms,
+        "distance_span_mm": distance_span_mm,
+        "arrival_gradient_norm_s_per_mm": gradient_norm,
+        "speed_censored": speed_censored,
         "n_good": n_good,
         "valid": valid,
     }
@@ -1237,7 +1583,9 @@ def analyze_excitable_phase_front(
     search_post_ms: float = 40.0,
     min_neighbors: int = 8,
     max_residual_ms: float = 4.0,
-    min_arrival_span_ms: float = 0.25,
+    min_arrival_span_ms: float = 1.0,
+    min_distance_span_mm: float = 0.20,
+    max_speed_mm_per_s: float | None = 500.0,
     radial_center_grid_n: int = 15,
 ) -> dict[str, object]:
     """Analyze one event's preferred-phase crossing front."""
@@ -1266,6 +1614,8 @@ def analyze_excitable_phase_front(
         min_neighbors=min_neighbors,
         max_residual_ms=max_residual_ms,
         min_arrival_span_ms=min_arrival_span_ms,
+        min_distance_span_mm=min_distance_span_mm,
+        max_speed_mm_per_s=max_speed_mm_per_s,
     )
     return {
         "crossings_by_channel": crossings,
@@ -1342,6 +1692,181 @@ def read_wavefront_cache(path: str | Path) -> dict[str, dict[str, object]]:
             payload.update({key: value for key, value in group.attrs.items()})
             result[group_name] = payload
     return result
+
+
+def merge_time_intervals(intervals: Iterable[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Merge overlapping time intervals while preserving sorted coverage."""
+    ordered = sorted((float(start), float(stop)) for start, stop in intervals if float(stop) > float(start))
+    merged: list[list[float]] = []
+    for start, stop in ordered:
+        if not merged or start > merged[-1][1]:
+            merged.append([start, stop])
+        else:
+            merged[-1][1] = max(merged[-1][1], stop)
+    return [(start, stop) for start, stop in merged]
+
+
+def initialize_phasor_feature_cache(
+    path: str | Path,
+    coords_mm: np.ndarray,
+    electrodes: np.ndarray,
+    *,
+    config: dict[str, object],
+) -> None:
+    """Create a compact cache for sequentially processed narrowband phasors."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    coords_mm = np.asarray(coords_mm, dtype=np.float64)
+    electrodes = np.asarray(electrodes)
+    if coords_mm.shape != (electrodes.size, 2):
+        raise ValueError("coords_mm must have shape (n_electrodes, 2)")
+    with h5py.File(path, "w") as h5:
+        h5.attrs["config"] = json.dumps(config, sort_keys=True)
+        h5.attrs["complete"] = False
+        h5.create_dataset("coords_mm", data=coords_mm)
+        h5.create_dataset("electrodes", data=electrodes)
+        h5.create_group("segments")
+
+
+def append_phasor_feature_segment(
+    path: str | Path,
+    start_s: float,
+    time_s: np.ndarray,
+    u: np.ndarray,
+) -> None:
+    """Append one independently filtered phasor segment to a feature cache."""
+    time_s = np.asarray(time_s, dtype=np.float64)
+    u = np.asarray(u, dtype=np.complex64)
+    if u.ndim != 2 or time_s.shape != (u.shape[0],):
+        raise ValueError("u and time_s must have shapes (n_samples, n_channels) and (n_samples,)")
+    if time_s.size < 1 or np.any(np.diff(time_s) <= 0):
+        raise ValueError("time_s must contain strictly increasing values")
+    with h5py.File(path, "a") as h5:
+        if u.shape[1] != h5["electrodes"].shape[0]:
+            raise ValueError("Segment channel count does not match feature-cache electrodes")
+        segments = h5.require_group("segments")
+        name = f"segment{len(segments):04d}"
+        group = segments.create_group(name)
+        group.attrs["start_s"] = float(start_s)
+        group.attrs["stop_s"] = float(time_s[-1])
+        group.create_dataset("time_s", data=time_s)
+        group.create_dataset("u_real", data=np.real(u).astype(np.float32, copy=False), compression="lzf", shuffle=True)
+        group.create_dataset("u_imag", data=np.imag(u).astype(np.float32, copy=False), compression="lzf", shuffle=True)
+
+
+def finalize_phasor_feature_cache(path: str | Path) -> None:
+    """Mark a phasor cache complete after all requested segments were written."""
+    with h5py.File(path, "a") as h5:
+        h5.attrs["complete"] = True
+
+
+def phasor_feature_cache_matches(path: str | Path, config: dict[str, object]) -> bool:
+    """Return whether a complete phasor cache matches its preprocessing config."""
+    path = Path(path)
+    if not path.exists():
+        return False
+    with h5py.File(path, "r") as h5:
+        return bool(h5.attrs.get("complete", False)) and json.loads(h5.attrs.get("config", "{}")) == config
+
+
+def read_phasor_feature_metadata(path: str | Path) -> dict[str, object]:
+    """Read compact metadata without decompressing cached phasor arrays."""
+    with h5py.File(path, "r") as h5:
+        segments = [
+            {
+                "name": name,
+                "start_s": float(group.attrs["start_s"]),
+                "stop_s": float(group.attrs["stop_s"]),
+                "n_samples": int(group["time_s"].shape[0]),
+            }
+            for name, group in h5["segments"].items()
+        ]
+        return {
+            "config": json.loads(h5.attrs.get("config", "{}")),
+            "complete": bool(h5.attrs.get("complete", False)),
+            "coords_mm": h5["coords_mm"][:],
+            "electrodes": h5["electrodes"][:],
+            "segments": segments,
+        }
+
+
+def read_phasor_feature_interval(
+    path: str | Path,
+    start_s: float,
+    stop_s: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Read a requested interval from one cached phasor segment.
+
+    Returns ``u, time_s, coords_mm, electrodes``. Requested intervals must be
+    fully covered by one merged feature segment.
+    """
+    start_s = float(start_s)
+    stop_s = float(stop_s)
+    if stop_s <= start_s:
+        raise ValueError("Require stop_s > start_s")
+    with h5py.File(path, "r") as h5:
+        coords_mm = h5["coords_mm"][:]
+        electrodes = h5["electrodes"][:]
+        for group in h5["segments"].values():
+            time_s = group["time_s"][:]
+            sample_step = float(np.median(np.diff(time_s))) if time_s.size > 1 else 0.0
+            tolerance = 0.51 * sample_step
+            if start_s < float(time_s[0]) - tolerance or stop_s > float(time_s[-1]) + 1.01 * sample_step:
+                continue
+            keep = (time_s >= start_s - tolerance) & (time_s < stop_s - tolerance)
+            u = group["u_real"][keep].astype(np.float32) + 1j * group["u_imag"][keep].astype(np.float32)
+            return u.astype(np.complex64, copy=False), time_s[keep], coords_mm, electrodes
+    raise ValueError(f"No cached phasor segment covers interval [{start_s:g}, {stop_s:g}] s")
+
+
+def write_wavefront_sensitivity_cache(
+    path: str | Path,
+    rows: list[dict[str, object]],
+    *,
+    config: dict[str, object],
+) -> None:
+    """Write a compact table of event-wise wavefront sensitivity summaries."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as h5:
+        h5.attrs["config"] = json.dumps(config, sort_keys=True)
+        group = h5.create_group("wavefront_sensitivity")
+        if not rows:
+            return
+        for key in rows[0]:
+            values = [row[key] for row in rows]
+            if isinstance(values[0], str):
+                group.create_dataset(key, data=np.asarray(values, dtype=h5py.string_dtype("utf-8")))
+            else:
+                group.create_dataset(key, data=np.asarray(values))
+
+
+def read_wavefront_sensitivity_cache(path: str | Path) -> dict[str, object]:
+    """Read a wavefront sensitivity table written by ``write_wavefront_sensitivity_cache``."""
+    with h5py.File(path, "r") as h5:
+        group = h5["wavefront_sensitivity"]
+        rows = {}
+        for key, dataset in group.items():
+            values = dataset[:]
+            if values.dtype.kind in {"S", "O"}:
+                values = values.astype(str)
+            rows[key] = values
+        return {"config": json.loads(h5.attrs["config"]), "rows": rows}
+
+
+def wavefront_sensitivity_cache_matches(path: str | Path, config: dict[str, object]) -> tuple[bool, str]:
+    """Return whether a wavefront sensitivity cache exactly matches its configuration."""
+    path = Path(path)
+    if not path.exists():
+        return False, "missing"
+    try:
+        with h5py.File(path, "r") as h5:
+            cached = json.loads(h5.attrs["config"])
+            if "wavefront_sensitivity" not in h5:
+                return False, "missing /wavefront_sensitivity"
+    except (OSError, KeyError, json.JSONDecodeError) as exc:
+        return False, f"unreadable: {exc}"
+    return (True, "compatible") if cached == config else (False, "configuration differs")
 
 
 def fit_pgd_plane(

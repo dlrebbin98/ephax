@@ -13,10 +13,14 @@ from phase_waves import (
     SPATIAL_CLASS,
     WAVE_MODEL_CLASS,
     analyze_excitable_phase_front,
+    append_phasor_feature_segment,
     bandpass_downsample,
     classify_wave_model,
     classify_spatial_aperture,
     combine_excitable_phase_calibrations,
+    centered_excerpt_bounds,
+    compute_exact_dmd,
+    compute_hankel_dmd,
     compute_phase_velocity,
     detect_phase_crossings,
     demodulated_window_phasor,
@@ -43,10 +47,52 @@ from phase_waves import (
     wavelength_edge_flags,
     append_wavefront_rows,
     initialize_wavefront_cache,
+    initialize_phasor_feature_cache,
+    finalize_phasor_feature_cache,
+    merge_time_intervals,
+    phasor_feature_cache_matches,
+    read_phasor_feature_metadata,
+    read_phasor_feature_interval,
     read_wavefront_cache,
+    read_wavefront_sensitivity_cache,
+    read_dmd_cache,
+    run_event_dmd_screen,
     select_coherent_phase_front,
+    write_dmd_cache,
+    write_wavefront_sensitivity_cache,
+    wavefront_sensitivity_cache_matches,
+    dmd_cache_matches,
     _direction_stability_mask,
 )
+
+
+def test_phasor_feature_cache_round_trip_and_interval_merge(tmp_path):
+    path = tmp_path / "phasor_features.h5"
+    coords = np.array([[0.0, 0.0], [0.1, 0.2]])
+    electrodes = np.array([10, 11])
+    time_s = 1.0 + np.arange(11) / 500.0
+    u = np.exp(1j * 2.0 * np.pi * 45.0 * time_s[:, None]) * np.array([[1.0, 1j]])
+    config = {"band_low": 30.0, "band_high": 50.0, "fs_ds": 500.0}
+
+    merged = merge_time_intervals([(1.0, 1.01), (1.005, 1.02), (2.0, 2.1)])
+    assert merged == [(1.0, 1.02), (2.0, 2.1)]
+
+    initialize_phasor_feature_cache(path, coords, electrodes, config=config)
+    append_phasor_feature_segment(path, 1.0, time_s, u)
+    assert not phasor_feature_cache_matches(path, config)
+    finalize_phasor_feature_cache(path)
+    assert phasor_feature_cache_matches(path, config)
+    assert not phasor_feature_cache_matches(path, {**config, "fs_ds": 250.0})
+    metadata = read_phasor_feature_metadata(path)
+    assert metadata["complete"]
+    assert metadata["segments"][0]["n_samples"] == time_s.size
+
+    cached_u, cached_t, cached_coords, cached_electrodes = read_phasor_feature_interval(path, 1.004, 1.012)
+
+    np.testing.assert_allclose(cached_t, time_s[2:6])
+    np.testing.assert_allclose(cached_u, u[2:6], atol=1e-6)
+    np.testing.assert_allclose(cached_coords, coords)
+    np.testing.assert_array_equal(cached_electrodes, electrodes)
 
 
 def test_fit_k_phasor_plane_recovers_synthetic_wave_vector():
@@ -103,6 +149,90 @@ def test_extract_phasors_handles_zero_amplitude_channels():
     assert np.all(np.isfinite(u.real))
     assert np.allclose(u[:, 1], 0.0)
     assert np.nanmean(np.abs(u[:, 0])) > 0.99
+
+
+def test_exact_dmd_recovers_synthetic_analytic_mode():
+    fs = 500.0
+    t = np.arange(300) / fs
+    spatial_mode = np.exp(1j * np.linspace(-1.0, 1.0, 12))
+    samples = np.exp(1j * 2.0 * np.pi * 45.0 * t[:, None]) * spatial_mode[None, :]
+
+    result = compute_exact_dmd(samples, 1.0 / fs, energy_fraction=0.99, max_rank=30)
+
+    assert result["retained_rank"] == 1
+    assert result["frequency_hz"].shape == (1,)
+    np.testing.assert_allclose(result["frequency_hz"][0], 45.0, atol=1e-6)
+    recovered = result["modes"][:, 0]
+    recovered *= spatial_mode[0] / recovered[0]
+    np.testing.assert_allclose(recovered, spatial_mode, atol=1e-5)
+
+
+def test_hankel_dmd_recovers_short_noisy_analytic_mode():
+    rng = np.random.default_rng(12)
+    fs = 500.0
+    t = np.arange(100) / fs
+    spatial_mode = np.exp(1j * np.linspace(-0.8, 0.8, 10))
+    samples = np.exp(1j * 2.0 * np.pi * 45.0 * t[:, None]) * spatial_mode[None, :]
+    samples += 0.01 * (rng.normal(size=samples.shape) + 1j * rng.normal(size=samples.shape))
+
+    result = compute_hankel_dmd(samples, 1.0 / fs, n_delays=20, energy_fraction=0.99, max_rank=30)
+    best = int(np.argmax(result["contribution_fraction"]))
+
+    assert result["modes"].shape[0] == spatial_mode.size
+    np.testing.assert_allclose(result["frequency_hz"][best], 45.0, atol=0.5)
+
+
+def test_exact_dmd_rank_selection_honors_energy_and_cap():
+    rng = np.random.default_rng(13)
+    samples = rng.normal(size=(80, 50))
+
+    result = compute_exact_dmd(samples, 0.002, energy_fraction=0.99, max_rank=5)
+
+    assert result["retained_rank"] == 5
+    assert result["rank_cap_bound"]
+    assert result["cumulative_energy"][result["retained_rank"] - 1] < 0.99
+
+
+def test_analytic_dmd_avoids_real_signal_conjugate_pair():
+    fs = 500.0
+    t = np.arange(300) / fs
+    phase = np.linspace(-0.8, 0.8, 8)
+    real_result = compute_exact_dmd(np.cos(2.0 * np.pi * 45.0 * t[:, None] + phase[None, :]), 1.0 / fs)
+    analytic_result = compute_exact_dmd(np.exp(1j * (2.0 * np.pi * 45.0 * t[:, None] + phase[None, :])), 1.0 / fs)
+
+    assert np.count_nonzero(np.isclose(np.abs(real_result["frequency_hz"]), 45.0, atol=1e-6)) == 2
+    assert np.count_nonzero(np.isclose(analytic_result["frequency_hz"], 45.0, atol=1e-6)) == 1
+
+
+def test_centered_excerpt_bounds_shift_inside_recording():
+    assert centered_excerpt_bounds(0.1, 1.0, recording_stop_s=10.0) == (0.0, 1.0)
+    assert centered_excerpt_bounds(9.9, 1.0, recording_stop_s=10.0) == (9.0, 10.0)
+    assert centered_excerpt_bounds(5.0, 1.0, recording_stop_s=10.0) == (4.5, 5.5)
+
+
+def test_event_dmd_cache_round_trip_and_compatibility(tmp_path):
+    fs = 500.0
+    coords = np.column_stack((np.linspace(0.0, 1.0, 6), np.zeros(6)))
+    events = [{"event_id": 4, "anchor_time_s": 1.0}, {"event_id": 9, "anchor_time_s": 2.0}]
+
+    def load_samples(event):
+        t = np.arange(100) / fs
+        mode = np.exp(1j * np.linspace(-0.5, 0.5, coords.shape[0]))
+        analytic = np.exp(1j * 2.0 * np.pi * (40.0 + event["event_id"]) * t[:, None]) * mode[None, :]
+        return {"narrow_analytic": analytic}
+
+    screen = run_event_dmd_screen(events, load_samples, coords, dt_s=1.0 / fs, hankel_delays=12, store_top_modes=2)
+    path = tmp_path / "dmd_screen.h5"
+    config = {"fs_ds": fs, "hankel_delays": 12}
+    write_dmd_cache(path, screen, config=config)
+    restored = read_dmd_cache(path)
+
+    assert restored["coords_mm"].shape == coords.shape
+    assert restored["spatial_modes"].shape[1] == coords.shape[0]
+    assert restored["events"]["event_id"].tolist() == [4, 9]
+    assert set(restored["mode_metrics"]["variant"].tolist()) == {"exact", "hankel"}
+    assert dmd_cache_matches(path, config) == (True, "compatible")
+    assert dmd_cache_matches(path, {"fs_ds": 250.0}) == (False, "configuration differs")
 
 
 def test_demodulated_window_phasor_prevents_temporal_cancellation():
@@ -366,6 +496,59 @@ def test_noisy_local_arrivals_are_retained_but_fail_qc():
     assert not np.any(local["valid"])
 
 
+def test_fast_local_arrivals_are_retained_but_marked_censored():
+    x, y = np.meshgrid(np.linspace(0.0, 1.0, 10), np.linspace(0.0, 1.0, 10))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    arrival = 1.0 + coords[:, 0] / 1000.0
+    neighborhoods = make_local_phase_neighborhoods(
+        coords,
+        radius_mm=0.35,
+        min_neighbors=8,
+        max_radius_mm=0.5,
+        max_neighbors=20,
+    )
+
+    local = fit_local_arrival_velocity(
+        arrival,
+        coords,
+        neighborhoods,
+        min_neighbors=8,
+        min_arrival_span_ms=0.0,
+        max_speed_mm_per_s=500.0,
+    )
+
+    finite = np.isfinite(local["speed_mm_per_s"])
+    assert np.any(finite)
+    assert np.all(local["speed_censored"][finite])
+    assert not np.any(local["valid"])
+    np.testing.assert_allclose(np.nanmedian(local["arrival_gradient_norm_s_per_mm"]), 1.0 / 1000.0, rtol=0.02)
+
+
+def test_local_arrival_velocity_requires_spatial_support():
+    x, y = np.meshgrid(np.linspace(0.0, 0.10, 10), np.linspace(0.0, 0.10, 10))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    arrival = 1.0 + coords[:, 0] / 100.0
+    neighborhoods = make_local_phase_neighborhoods(
+        coords,
+        radius_mm=0.20,
+        min_neighbors=8,
+        max_radius_mm=0.25,
+        max_neighbors=20,
+    )
+
+    local = fit_local_arrival_velocity(
+        arrival,
+        coords,
+        neighborhoods,
+        min_neighbors=8,
+        min_arrival_span_ms=0.0,
+        min_distance_span_mm=0.20,
+    )
+
+    assert np.isfinite(local["speed_mm_per_s"]).any()
+    assert not np.any(local["valid"])
+
+
 def test_analyze_excitable_phase_front_recovers_selected_planar_crossing():
     fs = 1000.0
     time_s = np.arange(0.94, 1.06, 1.0 / fs)
@@ -425,6 +608,25 @@ def test_wavefront_cache_round_trip(tmp_path):
     np.testing.assert_allclose(payload["wavefront_local"]["speed_mm_per_s"], [90.0, 110.0])
     with pytest.raises(ValueError, match="match the existing cache schema"):
         append_wavefront_rows(path, "wavefront_events", [{"event_idx": 2}])
+
+
+def test_wavefront_sensitivity_cache_round_trip(tmp_path):
+    path = tmp_path / "wavefront_sensitivity.h5"
+    config = {"bands": [[42.0, 48.0]], "radii_mm": [0.3]}
+    rows = [
+        {"event_idx": 1, "variant_kind": "observed", "median_speed_mm_per_s": 80.0},
+        {"event_idx": 2, "variant_kind": "null_shift", "median_speed_mm_per_s": 120.0},
+    ]
+
+    write_wavefront_sensitivity_cache(path, rows, config=config)
+    restored = read_wavefront_sensitivity_cache(path)
+
+    assert restored["config"] == config
+    assert restored["rows"]["event_idx"].tolist() == [1, 2]
+    assert restored["rows"]["variant_kind"].tolist() == ["observed", "null_shift"]
+    np.testing.assert_allclose(restored["rows"]["median_speed_mm_per_s"], [80.0, 120.0])
+    assert wavefront_sensitivity_cache_matches(path, config) == (True, "compatible")
+    assert wavefront_sensitivity_cache_matches(path, {"bands": []}) == (False, "configuration differs")
 
 
 def test_wavelength_edge_flags_identifies_censored_speeds():
