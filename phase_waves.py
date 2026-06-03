@@ -1409,7 +1409,7 @@ def fit_local_arrival_velocity(
     neighborhoods: dict[str, object],
     *,
     arrival_amplitude: np.ndarray | None = None,
-    min_arrival_amplitude: float = 0.0,
+    min_arrival_amplitude: float | np.ndarray = 0.0,
     match_max_ms: float = 8.0,
     min_neighbors: int = 8,
     max_residual_ms: float = 4.0,
@@ -1433,6 +1433,15 @@ def fit_local_arrival_velocity(
     arrival_amplitude = np.asarray(arrival_amplitude, dtype=np.float64)
     if arrival_amplitude.shape != arrival_time_s.shape:
         raise ValueError("arrival_amplitude must have shape (n_channels,)")
+    min_arrival_amplitude = np.asarray(min_arrival_amplitude, dtype=np.float64)
+    if min_arrival_amplitude.ndim == 0:
+        arrival_amplitude_threshold = np.full(
+            arrival_time_s.size, float(min_arrival_amplitude), dtype=np.float64
+        )
+    else:
+        arrival_amplitude_threshold = min_arrival_amplitude
+        if arrival_amplitude_threshold.shape != arrival_time_s.shape:
+            raise ValueError("min_arrival_amplitude must be scalar or have shape (n_channels,)")
     neighborhood_indices = neighborhoods.get("indices")
     neighborhood_valid = np.asarray(neighborhoods.get("valid"), dtype=bool)
     if not isinstance(neighborhood_indices, list) or neighborhood_valid.shape != arrival_time_s.shape:
@@ -1449,10 +1458,23 @@ def fit_local_arrival_velocity(
     velocity_y = np.full(n_channels, np.nan, dtype=np.float64)
     n_good = np.zeros(n_channels, dtype=np.int64)
     tolerance_s = float(match_max_ms) / 1000.0
-    for center_idx in np.flatnonzero(neighborhood_valid & np.isfinite(arrival_time_s)):
+    amplitude_valid = np.ones(n_channels, dtype=bool)
+    threshold_enabled = np.isfinite(arrival_amplitude_threshold) & (arrival_amplitude_threshold > 0.0)
+    if np.any(threshold_enabled):
+        amplitude_valid = np.where(
+            threshold_enabled,
+            np.isfinite(arrival_amplitude) & (arrival_amplitude >= arrival_amplitude_threshold),
+            True,
+        )
+    candidate_centers = neighborhood_valid & np.isfinite(arrival_time_s) & amplitude_valid
+    for center_idx in np.flatnonzero(candidate_centers):
         indices = np.asarray(neighborhood_indices[int(center_idx)], dtype=np.int64)
         local_times = arrival_time_s[indices]
-        keep = np.isfinite(local_times) & (np.abs(local_times - arrival_time_s[int(center_idx)]) <= tolerance_s)
+        keep = (
+            np.isfinite(local_times)
+            & (np.abs(local_times - arrival_time_s[int(center_idx)]) <= tolerance_s)
+            & amplitude_valid[indices]
+        )
         indices = indices[keep]
         if indices.size < int(min_neighbors) + 1:
             continue
@@ -1482,9 +1504,6 @@ def fit_local_arrival_velocity(
     speed_censored = np.zeros(n_channels, dtype=bool)
     if max_speed_mm_per_s is not None:
         speed_censored = np.isfinite(speed) & (speed > float(max_speed_mm_per_s))
-    amplitude_valid = np.ones(n_channels, dtype=bool)
-    if float(min_arrival_amplitude) > 0.0:
-        amplitude_valid = np.isfinite(arrival_amplitude) & (arrival_amplitude >= float(min_arrival_amplitude))
     valid = (
         np.isfinite(speed)
         & np.isfinite(residual_ms)
@@ -1507,6 +1526,7 @@ def fit_local_arrival_velocity(
         "arrival_span_ms": arrival_span_ms,
         "distance_span_mm": distance_span_mm,
         "arrival_amplitude": arrival_amplitude,
+        "arrival_amplitude_threshold": arrival_amplitude_threshold,
         "arrival_gradient_norm_s_per_mm": gradient_norm,
         "speed_censored": speed_censored,
         "n_good": n_good,
@@ -1604,6 +1624,7 @@ def analyze_excitable_phase_front(
     *,
     amplitude: np.ndarray | None = None,
     min_arrival_amplitude: float = 0.0,
+    min_arrival_amplitude_percentile: float = 0.0,
     theta_excitable_rad: float,
     anchor_time_s: float,
     frequency_hz: float = 45.0,
@@ -1641,12 +1662,28 @@ def analyze_excitable_phase_front(
         if amplitude is not None
         else np.full(arrival_time_s.shape, np.nan, dtype=np.float64)
     )
+    min_arrival_amplitude_percentile = float(min_arrival_amplitude_percentile)
+    if not 0.0 <= min_arrival_amplitude_percentile <= 100.0:
+        raise ValueError("min_arrival_amplitude_percentile must be in [0, 100]")
+    arrival_amplitude_threshold = np.full(
+        arrival_time_s.shape, float(min_arrival_amplitude), dtype=np.float64
+    )
+    if min_arrival_amplitude_percentile > 0.0:
+        if amplitude is None:
+            arrival_amplitude_threshold = np.full(arrival_time_s.shape, np.nan, dtype=np.float64)
+        else:
+            percentile_threshold = np.nanpercentile(
+                np.asarray(amplitude, dtype=np.float64),
+                min_arrival_amplitude_percentile,
+                axis=0,
+            )
+            arrival_amplitude_threshold = np.maximum(arrival_amplitude_threshold, percentile_threshold)
     local = fit_local_arrival_velocity(
         arrival_time_s,
         coords_mm,
         neighborhoods,
         arrival_amplitude=arrival_amplitude,
-        min_arrival_amplitude=min_arrival_amplitude,
+        min_arrival_amplitude=arrival_amplitude_threshold,
         match_max_ms=match_max_ms,
         min_neighbors=min_neighbors,
         max_residual_ms=max_residual_ms,
@@ -1658,6 +1695,7 @@ def analyze_excitable_phase_front(
         "crossings_by_channel": crossings,
         "front": front,
         "arrival_amplitude": arrival_amplitude,
+        "arrival_amplitude_threshold": arrival_amplitude_threshold,
         "local": local,
         "planar": fit_arrival_time_plane(arrival_time_s, coords_mm),
         "radial": fit_arrival_time_radial(arrival_time_s, coords_mm, center_grid_n=radial_center_grid_n),
@@ -1891,11 +1929,12 @@ def read_phasor_feature_interval(
     stop_s: float,
     *,
     include_amplitude: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, ...]:
     """Read a requested interval from one cached phasor segment.
 
-    Returns ``u, time_s, coords_mm, electrodes``. Requested intervals must be
-    fully covered by one merged feature segment.
+    Returns ``u, time_s, coords_mm, electrodes`` or ``u, time_s, coords_mm,
+    electrodes, amplitude`` when ``include_amplitude=True``. Requested
+    intervals must be fully covered by one merged feature segment.
     """
     start_s = float(start_s)
     stop_s = float(stop_s)

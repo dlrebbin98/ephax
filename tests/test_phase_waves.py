@@ -651,10 +651,40 @@ def test_local_arrival_velocity_applies_minimum_arrival_amplitude_qc():
         min_distance_span_mm=0.0,
     )
 
-    assert np.isfinite(low_amp["speed_mm_per_s"]).any()
+    assert not np.isfinite(low_amp["speed_mm_per_s"]).any()
     assert not np.any(low_amp["valid"])
     assert np.any(high_amp["valid"])
     np.testing.assert_allclose(low_amp["arrival_amplitude"], 0.5)
+    np.testing.assert_allclose(low_amp["arrival_amplitude_threshold"], 1.0)
+
+
+def test_local_arrival_velocity_accepts_per_channel_arrival_amplitude_threshold():
+    x, y = np.meshgrid(np.linspace(0.0, 1.0, 8), np.linspace(0.0, 1.0, 8))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    arrival = 1.0 + coords[:, 0] / 100.0
+    neighborhoods = make_local_phase_neighborhoods(
+        coords,
+        radius_mm=0.35,
+        min_neighbors=8,
+        max_radius_mm=0.5,
+        max_neighbors=20,
+    )
+    threshold = np.ones(arrival.shape, dtype=float)
+    threshold[: arrival.size // 2] = 3.0
+
+    local = fit_local_arrival_velocity(
+        arrival,
+        coords,
+        neighborhoods,
+        arrival_amplitude=np.full(arrival.shape, 2.0),
+        min_arrival_amplitude=threshold,
+        min_arrival_span_ms=0.0,
+        min_distance_span_mm=0.0,
+    )
+
+    assert not np.any(local["valid"][: arrival.size // 2])
+    assert np.any(local["valid"][arrival.size // 2 :])
+    np.testing.assert_allclose(local["arrival_amplitude_threshold"], threshold)
 
 
 def test_analyze_excitable_phase_front_recovers_selected_planar_crossing():
@@ -687,6 +717,43 @@ def test_analyze_excitable_phase_front_recovers_selected_planar_crossing():
     assert result["front"]["valid"] == 1
     np.testing.assert_allclose(result["front"]["arrival_time_s"], arrival, atol=1e-6)
     np.testing.assert_allclose(result["planar"]["planar_speed_mm_per_s"], 1.0 / np.hypot(0.003, -0.001), rtol=0.01)
+
+
+def test_analyze_excitable_phase_front_applies_arrival_amplitude_percentile():
+    fs = 1000.0
+    time_s = np.arange(0.94, 1.06, 1.0 / fs)
+    x, y = np.meshgrid(np.linspace(0.0, 1.0, 8), np.linspace(0.0, 1.0, 8))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    arrival = 1.0 + coords @ np.array([0.003, -0.001])
+    omega = 2.0 * np.pi * 45.0
+    u = np.exp(1j * omega * (time_s[:, None] - arrival[None, :]))
+    amplitude = np.full(u.shape, 2.0, dtype=float)
+    neighborhoods = make_local_phase_neighborhoods(
+        coords,
+        radius_mm=0.35,
+        min_neighbors=8,
+        max_radius_mm=0.5,
+        max_neighbors=20,
+    )
+
+    result = analyze_excitable_phase_front(
+        u,
+        time_s,
+        coords,
+        neighborhoods,
+        amplitude=amplitude,
+        min_arrival_amplitude_percentile=50.0,
+        theta_excitable_rad=0.0,
+        anchor_time_s=1.0,
+        min_electrodes=50,
+        min_neighbors=8,
+        min_arrival_span_ms=0.0,
+        min_distance_span_mm=0.0,
+    )
+
+    assert result["front"]["valid"] == 1
+    assert np.any(result["local"]["valid"])
+    np.testing.assert_allclose(result["arrival_amplitude_threshold"], 2.0)
 
 
 def test_wavefront_cache_round_trip(tmp_path):
