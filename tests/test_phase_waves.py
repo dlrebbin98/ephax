@@ -57,6 +57,7 @@ from phase_waves import (
     read_wavefront_sensitivity_cache,
     read_dmd_cache,
     run_event_dmd_screen,
+    select_representative_event_indices,
     select_coherent_phase_front,
     write_dmd_cache,
     write_wavefront_sensitivity_cache,
@@ -78,7 +79,8 @@ def test_phasor_feature_cache_round_trip_and_interval_merge(tmp_path):
     assert merged == [(1.0, 1.02), (2.0, 2.1)]
 
     initialize_phasor_feature_cache(path, coords, electrodes, config=config)
-    append_phasor_feature_segment(path, 1.0, time_s, u)
+    amplitude = np.linspace(1.0, 2.0, time_s.size)[:, None] * np.array([[1.0, 2.0]])
+    append_phasor_feature_segment(path, 1.0, time_s, u, amplitude)
     assert not phasor_feature_cache_matches(path, config)
     finalize_phasor_feature_cache(path)
     assert phasor_feature_cache_matches(path, config)
@@ -86,13 +88,82 @@ def test_phasor_feature_cache_round_trip_and_interval_merge(tmp_path):
     metadata = read_phasor_feature_metadata(path)
     assert metadata["complete"]
     assert metadata["segments"][0]["n_samples"] == time_s.size
+    assert metadata["segments"][0]["has_amplitude"]
 
     cached_u, cached_t, cached_coords, cached_electrodes = read_phasor_feature_interval(path, 1.004, 1.012)
+    cached_u_amp, cached_t_amp, _, _, cached_amp = read_phasor_feature_interval(
+        path, 1.004, 1.012, include_amplitude=True
+    )
 
     np.testing.assert_allclose(cached_t, time_s[2:6])
     np.testing.assert_allclose(cached_u, u[2:6], atol=1e-6)
+    np.testing.assert_allclose(cached_u_amp, u[2:6], atol=1e-6)
+    np.testing.assert_allclose(cached_t_amp, time_s[2:6])
+    np.testing.assert_allclose(cached_amp, amplitude[2:6], rtol=1e-6)
     np.testing.assert_allclose(cached_coords, coords)
     np.testing.assert_array_equal(cached_electrodes, electrodes)
+
+
+def test_phasor_feature_cache_partial_resume_does_not_duplicate_segments(tmp_path):
+    path = tmp_path / "phasor_features_partial.h5"
+    coords = np.array([[0.0, 0.0], [0.1, 0.2]])
+    electrodes = np.array([10, 11])
+    config = {
+        "profile": "permissive",
+        "calibration_event_ids": [1, 3],
+        "scoring_event_ids": [2],
+        "band_low": 30.0,
+        "band_high": 50.0,
+        "fs_ds": 500.0,
+        "filter_pad_s": 0.25,
+    }
+    first_time = 1.0 + np.arange(6) / 500.0
+    second_time = 2.0 + np.arange(6) / 500.0
+    u = np.ones((6, 2), dtype=np.complex64)
+
+    initialize_phasor_feature_cache(path, coords, electrodes, config=config)
+    append_phasor_feature_segment(path, 1.0, first_time, u)
+    partial = read_phasor_feature_metadata(path)
+    assert not partial["complete"]
+    assert len(partial["segments"]) == 1
+
+    append_phasor_feature_segment(path, 2.0, second_time, u)
+    finalize_phasor_feature_cache(path)
+    restored = read_phasor_feature_metadata(path)
+    assert restored["complete"]
+    assert [segment["start_s"] for segment in restored["segments"]] == [1.0, 2.0]
+    assert not phasor_feature_cache_matches(path, {**config, "profile": "confirm"})
+    assert not phasor_feature_cache_matches(path, {**config, "scoring_event_ids": [4]})
+    assert not phasor_feature_cache_matches(path, {**config, "filter_pad_s": 0.5})
+
+
+def test_select_representative_event_indices_prefers_disjoint_sets():
+    selected = select_representative_event_indices(80, n_calibration=25, n_scoring=15)
+
+    assert selected["calibration_indices"].size == 25
+    assert selected["scoring_indices"].size == 15
+    assert selected["overlap_count"] == 0
+    assert np.intersect1d(selected["calibration_indices"], selected["scoring_indices"]).size == 0
+    np.testing.assert_array_equal(
+        selected["scoring_indices"],
+        select_representative_event_indices(80, n_calibration=25, n_scoring=15)["scoring_indices"],
+    )
+
+
+def test_select_representative_event_indices_reports_low_count_overlap():
+    selected = select_representative_event_indices(20, n_calibration=15, n_scoring=10)
+
+    assert selected["calibration_indices"].size == 15
+    assert selected["scoring_indices"].size == 10
+    assert selected["overlap_count"] == 5
+
+
+def test_select_representative_event_indices_confirm_uses_all_for_calibration():
+    selected = select_representative_event_indices(20, n_calibration=None, n_scoring=8)
+
+    np.testing.assert_array_equal(selected["calibration_indices"], np.arange(20))
+    assert selected["scoring_indices"].size == 8
+    assert selected["overlap_count"] == 8
 
 
 def test_fit_k_phasor_plane_recovers_synthetic_wave_vector():
@@ -547,6 +618,43 @@ def test_local_arrival_velocity_requires_spatial_support():
 
     assert np.isfinite(local["speed_mm_per_s"]).any()
     assert not np.any(local["valid"])
+
+
+def test_local_arrival_velocity_applies_minimum_arrival_amplitude_qc():
+    x, y = np.meshgrid(np.linspace(0.0, 1.0, 8), np.linspace(0.0, 1.0, 8))
+    coords = np.column_stack((x.ravel(), y.ravel()))
+    arrival = 1.0 + coords[:, 0] / 100.0
+    neighborhoods = make_local_phase_neighborhoods(
+        coords,
+        radius_mm=0.35,
+        min_neighbors=8,
+        max_radius_mm=0.5,
+        max_neighbors=20,
+    )
+
+    low_amp = fit_local_arrival_velocity(
+        arrival,
+        coords,
+        neighborhoods,
+        arrival_amplitude=np.full(arrival.shape, 0.5),
+        min_arrival_amplitude=1.0,
+        min_arrival_span_ms=0.0,
+        min_distance_span_mm=0.0,
+    )
+    high_amp = fit_local_arrival_velocity(
+        arrival,
+        coords,
+        neighborhoods,
+        arrival_amplitude=np.full(arrival.shape, 2.0),
+        min_arrival_amplitude=1.0,
+        min_arrival_span_ms=0.0,
+        min_distance_span_mm=0.0,
+    )
+
+    assert np.isfinite(low_amp["speed_mm_per_s"]).any()
+    assert not np.any(low_amp["valid"])
+    assert np.any(high_amp["valid"])
+    np.testing.assert_allclose(low_amp["arrival_amplitude"], 0.5)
 
 
 def test_analyze_excitable_phase_front_recovers_selected_planar_crossing():

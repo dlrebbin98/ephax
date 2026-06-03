@@ -1387,11 +1387,29 @@ def select_coherent_phase_front(
     }
 
 
+def sample_at_event_times(values: np.ndarray, time_s: np.ndarray, event_time_s: np.ndarray) -> np.ndarray:
+    """Interpolate per-channel time series values at per-channel event times."""
+    values = np.asarray(values, dtype=np.float64)
+    time_s = np.asarray(time_s, dtype=np.float64)
+    event_time_s = np.asarray(event_time_s, dtype=np.float64)
+    if values.ndim != 2 or time_s.shape != (values.shape[0],):
+        raise ValueError("values and time_s must have shapes (n_samples, n_channels) and (n_samples,)")
+    if event_time_s.shape != (values.shape[1],):
+        raise ValueError("event_time_s must have shape (n_channels,)")
+    out = np.full(event_time_s.shape, np.nan, dtype=np.float64)
+    for channel_idx, event_time in enumerate(event_time_s):
+        if np.isfinite(event_time):
+            out[channel_idx] = np.interp(event_time, time_s, values[:, channel_idx], left=np.nan, right=np.nan)
+    return out
+
+
 def fit_local_arrival_velocity(
     arrival_time_s: np.ndarray,
     coords_mm: np.ndarray,
     neighborhoods: dict[str, object],
     *,
+    arrival_amplitude: np.ndarray | None = None,
+    min_arrival_amplitude: float = 0.0,
     match_max_ms: float = 8.0,
     min_neighbors: int = 8,
     max_residual_ms: float = 4.0,
@@ -1410,6 +1428,11 @@ def fit_local_arrival_velocity(
     coords_mm = np.asarray(coords_mm, dtype=np.float64)
     if coords_mm.shape != (arrival_time_s.size, 2):
         raise ValueError("coords_mm must have shape (n_channels, 2)")
+    if arrival_amplitude is None:
+        arrival_amplitude = np.full(arrival_time_s.size, np.nan, dtype=np.float64)
+    arrival_amplitude = np.asarray(arrival_amplitude, dtype=np.float64)
+    if arrival_amplitude.shape != arrival_time_s.shape:
+        raise ValueError("arrival_amplitude must have shape (n_channels,)")
     neighborhood_indices = neighborhoods.get("indices")
     neighborhood_valid = np.asarray(neighborhoods.get("valid"), dtype=bool)
     if not isinstance(neighborhood_indices, list) or neighborhood_valid.shape != arrival_time_s.shape:
@@ -1459,6 +1482,9 @@ def fit_local_arrival_velocity(
     speed_censored = np.zeros(n_channels, dtype=bool)
     if max_speed_mm_per_s is not None:
         speed_censored = np.isfinite(speed) & (speed > float(max_speed_mm_per_s))
+    amplitude_valid = np.ones(n_channels, dtype=bool)
+    if float(min_arrival_amplitude) > 0.0:
+        amplitude_valid = np.isfinite(arrival_amplitude) & (arrival_amplitude >= float(min_arrival_amplitude))
     valid = (
         np.isfinite(speed)
         & np.isfinite(residual_ms)
@@ -1468,6 +1494,7 @@ def fit_local_arrival_velocity(
         & np.isfinite(distance_span_mm)
         & (distance_span_mm >= float(min_distance_span_mm))
         & (n_good >= int(min_neighbors) + 1)
+        & amplitude_valid
         & ~speed_censored
     )
     return {
@@ -1479,6 +1506,7 @@ def fit_local_arrival_velocity(
         "residual_rms_ms": residual_ms,
         "arrival_span_ms": arrival_span_ms,
         "distance_span_mm": distance_span_mm,
+        "arrival_amplitude": arrival_amplitude,
         "arrival_gradient_norm_s_per_mm": gradient_norm,
         "speed_censored": speed_censored,
         "n_good": n_good,
@@ -1574,6 +1602,8 @@ def analyze_excitable_phase_front(
     coords_mm: np.ndarray,
     neighborhoods: dict[str, object],
     *,
+    amplitude: np.ndarray | None = None,
+    min_arrival_amplitude: float = 0.0,
     theta_excitable_rad: float,
     anchor_time_s: float,
     frequency_hz: float = 45.0,
@@ -1606,10 +1636,17 @@ def analyze_excitable_phase_front(
         search_post_ms=search_post_ms,
     )
     arrival_time_s = np.asarray(front["arrival_time_s"], dtype=np.float64)
+    arrival_amplitude = (
+        sample_at_event_times(amplitude, time_s, arrival_time_s)
+        if amplitude is not None
+        else np.full(arrival_time_s.shape, np.nan, dtype=np.float64)
+    )
     local = fit_local_arrival_velocity(
         arrival_time_s,
         coords_mm,
         neighborhoods,
+        arrival_amplitude=arrival_amplitude,
+        min_arrival_amplitude=min_arrival_amplitude,
         match_max_ms=match_max_ms,
         min_neighbors=min_neighbors,
         max_residual_ms=max_residual_ms,
@@ -1620,6 +1657,7 @@ def analyze_excitable_phase_front(
     return {
         "crossings_by_channel": crossings,
         "front": front,
+        "arrival_amplitude": arrival_amplitude,
         "local": local,
         "planar": fit_arrival_time_plane(arrival_time_s, coords_mm),
         "radial": fit_arrival_time_radial(arrival_time_s, coords_mm, center_grid_n=radial_center_grid_n),
@@ -1706,6 +1744,55 @@ def merge_time_intervals(intervals: Iterable[tuple[float, float]]) -> list[tuple
     return [(start, stop) for start, stop in merged]
 
 
+def select_representative_event_indices(
+    n_events: int,
+    *,
+    n_calibration: int | None,
+    n_scoring: int,
+) -> dict[str, np.ndarray | int]:
+    """Select deterministic, approximately even calibration and scoring events.
+
+    Scoring events are selected first. Calibration events are selected from the
+    remaining events where possible. When there are too few events for disjoint
+    sets, the calibration set is filled deterministically from the scoring set.
+    ``n_calibration=None`` selects every event for confirmatory calibration.
+    """
+    n_events = int(n_events)
+    n_scoring = int(n_scoring)
+    if n_events < 1:
+        raise ValueError("n_events must be positive")
+    if n_scoring < 1:
+        raise ValueError("n_scoring must be positive")
+    if n_calibration is not None and int(n_calibration) < 1:
+        raise ValueError("n_calibration must be positive or None")
+
+    def evenly_spaced(values: np.ndarray, n_keep: int) -> np.ndarray:
+        values = np.asarray(values, dtype=np.int64)
+        n_keep = min(int(n_keep), values.size)
+        if n_keep == values.size:
+            return values.copy()
+        positions = np.round(np.linspace(0, values.size - 1, n_keep)).astype(np.int64)
+        return values[positions]
+
+    all_indices = np.arange(n_events, dtype=np.int64)
+    scoring = evenly_spaced(all_indices, n_scoring)
+    if n_calibration is None:
+        calibration = all_indices
+    else:
+        n_calibration = min(int(n_calibration), n_events)
+        available = np.setdiff1d(all_indices, scoring, assume_unique=True)
+        calibration = evenly_spaced(available, min(n_calibration, available.size))
+        if calibration.size < n_calibration:
+            fill = evenly_spaced(scoring, n_calibration - calibration.size)
+            calibration = np.sort(np.concatenate((calibration, fill)))
+    overlap = int(np.intersect1d(calibration, scoring, assume_unique=True).size)
+    return {
+        "calibration_indices": calibration,
+        "scoring_indices": scoring,
+        "overlap_count": overlap,
+    }
+
+
 def initialize_phasor_feature_cache(
     path: str | Path,
     coords_mm: np.ndarray,
@@ -1733,12 +1820,17 @@ def append_phasor_feature_segment(
     start_s: float,
     time_s: np.ndarray,
     u: np.ndarray,
+    amplitude: np.ndarray | None = None,
 ) -> None:
     """Append one independently filtered phasor segment to a feature cache."""
     time_s = np.asarray(time_s, dtype=np.float64)
     u = np.asarray(u, dtype=np.complex64)
     if u.ndim != 2 or time_s.shape != (u.shape[0],):
         raise ValueError("u and time_s must have shapes (n_samples, n_channels) and (n_samples,)")
+    if amplitude is not None:
+        amplitude = np.asarray(amplitude, dtype=np.float32)
+        if amplitude.shape != u.shape:
+            raise ValueError("amplitude must have the same shape as u")
     if time_s.size < 1 or np.any(np.diff(time_s) <= 0):
         raise ValueError("time_s must contain strictly increasing values")
     with h5py.File(path, "a") as h5:
@@ -1752,6 +1844,8 @@ def append_phasor_feature_segment(
         group.create_dataset("time_s", data=time_s)
         group.create_dataset("u_real", data=np.real(u).astype(np.float32, copy=False), compression="lzf", shuffle=True)
         group.create_dataset("u_imag", data=np.imag(u).astype(np.float32, copy=False), compression="lzf", shuffle=True)
+        if amplitude is not None:
+            group.create_dataset("amplitude", data=amplitude.astype(np.float32, copy=False), compression="lzf", shuffle=True)
 
 
 def finalize_phasor_feature_cache(path: str | Path) -> None:
@@ -1778,6 +1872,7 @@ def read_phasor_feature_metadata(path: str | Path) -> dict[str, object]:
                 "start_s": float(group.attrs["start_s"]),
                 "stop_s": float(group.attrs["stop_s"]),
                 "n_samples": int(group["time_s"].shape[0]),
+                "has_amplitude": "amplitude" in group,
             }
             for name, group in h5["segments"].items()
         ]
@@ -1794,6 +1889,8 @@ def read_phasor_feature_interval(
     path: str | Path,
     start_s: float,
     stop_s: float,
+    *,
+    include_amplitude: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Read a requested interval from one cached phasor segment.
 
@@ -1815,6 +1912,9 @@ def read_phasor_feature_interval(
                 continue
             keep = (time_s >= start_s - tolerance) & (time_s < stop_s - tolerance)
             u = group["u_real"][keep].astype(np.float32) + 1j * group["u_imag"][keep].astype(np.float32)
+            if include_amplitude:
+                amplitude = group["amplitude"][keep] if "amplitude" in group else np.full(u.shape, np.nan, dtype=np.float32)
+                return u.astype(np.complex64, copy=False), time_s[keep], coords_mm, electrodes, amplitude
             return u.astype(np.complex64, copy=False), time_s[keep], coords_mm, electrodes
     raise ValueError(f"No cached phasor segment covers interval [{start_s:g}, {stop_s:g}] s")
 
