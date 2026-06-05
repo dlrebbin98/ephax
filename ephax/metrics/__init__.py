@@ -26,6 +26,18 @@ from .burst import (
 from .cofiring import aggregate_cofiring_heatmap, cofiring_proportions, cofiring_vs_distance_by_delay
 from .firing_distance import avg_rate_vs_distance, cofiring_avg_vs_distance
 from .ifr import calculate_ifr, ifr_peaks, prepare_ifr_timeseries_panel, prepare_ifr_timeseries_panels
+from .sttc import (
+    compute_sttc_adjacency,
+    concatenate_spike_times_over_intervals,
+    normalize_interval_array,
+    read_sttc_network_cache,
+    spike_time_tiling_coefficient,
+    spike_times_by_electrode_in_intervals,
+    sttc_spike_proportion,
+    sttc_tiling_proportion,
+    thresholded_edge_table,
+    write_sttc_network_cache,
+)
 from .transfer_entropy import (
     blocks_to_bins,
     build_observation_summary,
@@ -76,6 +88,8 @@ __all__ = [
     "analyze_eventwise_waves",
     "compute_or_load_wave_result",
     "counts_from_te_states",
+    "compute_sttc_adjacency",
+    "concatenate_spike_times_over_intervals",
     "detect_coarse_burst_epochs",
     "detect_high_activity_epochs",
     "detect_nested_gamma_anchors",
@@ -88,16 +102,24 @@ __all__ = [
     "ifr_peaks",
     "interval_membership",
     "load_wave_result_cache",
+    "normalize_interval_array",
     "order_aligned_rate_by_summary",
     "order_aligned_rate_by_x",
     "prepare_ifr_timeseries_panel",
     "prepare_ifr_timeseries_panels",
+    "read_sttc_network_cache",
     "refine_participation_burst_anchors",
     "run_discrete_te",
     "save_wave_result_cache",
+    "spike_time_tiling_coefficient",
+    "spike_times_by_electrode_in_intervals",
+    "sttc_spike_proportion",
+    "sttc_tiling_proportion",
     "summarize_aligned_electrode_rates",
     "summarize_wave_peaks",
+    "thresholded_edge_table",
     "transfer_entropy_bits_from_counts",
     "wave_cache_dir",
     "wave_cache_key",
+    "write_sttc_network_cache",
 ]

@@ -782,31 +782,57 @@ def build_highres_traces(
     spike_electrodes = np.asarray(recording.spikes["electrode"], dtype=int)
 
     electrodes = np.asarray(selected_electrodes, dtype=int)
-    per_electrode_rate_hz = np.empty((len(electrodes), len(time_centers)), dtype=np.float32)
-    spike_presence = np.empty((len(electrodes), len(time_centers)), dtype=bool)
-    spikes_by_electrode: dict[int, np.ndarray] = {}
-    sigma_bins = float(smooth_sigma_ms) / float(bin_ms)
-    for row_idx, electrode in enumerate(electrodes):
-        electrode = int(electrode)
-        electrode_times = np.sort(
-            spike_times[
-                (spike_electrodes == electrode)
-                & (spike_times >= recording.start_time)
-                & (spike_times <= recording.end_time)
-            ]
-        )
-        spikes_by_electrode[electrode] = electrode_times
+    n_electrodes = len(electrodes)
+    n_bins = len(time_centers)
+    counts = np.zeros((n_electrodes, n_bins), dtype=np.int16)
+    spikes_by_electrode: dict[int, np.ndarray] = {int(electrode): np.array([], dtype=float) for electrode in electrodes}
 
-        counts, _ = np.histogram(electrode_times, bins=bin_edges)
-        rate_hz = counts.astype(np.float32)
-        rate_hz /= np.float32(dt)
-        per_electrode_rate_hz[row_idx] = gaussian_filter1d(
-            rate_hz,
-            sigma=sigma_bins,
-            mode="nearest",
-            output=np.float32,
+    if n_electrodes and n_bins:
+        in_window = (
+            (spike_times >= float(recording.start_time))
+            & (spike_times <= float(recording.end_time))
         )
-        spike_presence[row_idx] = counts > 0
+        if np.any(in_window):
+            window_times = spike_times[in_window]
+            window_electrodes = spike_electrodes[in_window]
+
+            order = np.argsort(electrodes, kind="mergesort")
+            sorted_electrodes = electrodes[order]
+            positions = np.searchsorted(sorted_electrodes, window_electrodes)
+            matched = np.zeros(window_electrodes.shape, dtype=bool)
+            valid_positions = positions < sorted_electrodes.size
+            matched[valid_positions] = sorted_electrodes[positions[valid_positions]] == window_electrodes[valid_positions]
+            if np.any(matched):
+                matched_times = window_times[matched]
+                row_idx = order[positions[matched]]
+                bin_idx = np.searchsorted(bin_edges, matched_times, side="right") - 1
+                bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+                np.add.at(counts, (row_idx, bin_idx), 1)
+
+            if window_times.size:
+                keep = np.isin(window_electrodes, electrodes)
+                if np.any(keep):
+                    kept_times = window_times[keep]
+                    kept_electrodes = window_electrodes[keep]
+                    sort_idx = np.lexsort((kept_times, kept_electrodes))
+                    kept_times = kept_times[sort_idx]
+                    kept_electrodes = kept_electrodes[sort_idx]
+                    unique_electrodes, starts = np.unique(kept_electrodes, return_index=True)
+                    stops = np.r_[starts[1:], kept_times.size]
+                    for electrode, start, stop in zip(unique_electrodes, starts, stops):
+                        spikes_by_electrode[int(electrode)] = kept_times[start:stop].astype(float, copy=False)
+
+    spike_presence = counts > 0
+    rate_hz = counts.astype(np.float32)
+    rate_hz /= np.float32(dt)
+    sigma_bins = float(smooth_sigma_ms) / float(bin_ms)
+    per_electrode_rate_hz = gaussian_filter1d(
+        rate_hz,
+        sigma=sigma_bins,
+        axis=1,
+        mode="nearest",
+        output=np.float32,
+    )
 
     population_rate_hz = per_electrode_rate_hz.mean(axis=0)
 

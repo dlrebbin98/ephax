@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.colors import to_rgba
+from scipy.ndimage import gaussian_filter1d
 
 from ephax import PrepConfig, Recording, RestingActivityDataset, workflows
 from ephax.models import WaveAnalysisResult
@@ -79,6 +80,54 @@ def fixture_burst_dataset():
     }
     rec = Recording(spikes=spikes, layout=layout, start_time=0.0, end_time=4.0, sf=1000.0)
     return RestingActivityDataset([rec], sf=1000.0)
+
+
+def test_build_highres_traces_matches_loop_reference():
+    spikes = {
+        "time": np.array([0.0, 0.004, 0.010, 0.010, 0.019, 0.020, 0.031, 0.049, 0.050]),
+        "channel": np.array([1, 1, 2, 3, 2, 1, 4, 3, 2]),
+        "amplitude": np.ones(9),
+        "electrode": np.array([101, 101, 102, 103, 102, 101, 999, 103, 102]),
+    }
+    layout = {
+        "channel": np.array([1, 2, 3]),
+        "electrode": np.array([101, 102, 103]),
+        "x": np.array([0.0, 100.0, 200.0]),
+        "y": np.array([0.0, 0.0, 0.0]),
+    }
+    rec = Recording(spikes=spikes, layout=layout, start_time=0.0, end_time=0.05, sf=1000.0)
+    electrodes = np.array([101, 102, 103])
+    bin_ms = 10.0
+    smooth_ms = 10.0
+    dt = bin_ms / 1000.0
+    bin_edges = np.arange(rec.start_time, rec.end_time + dt, dt)
+
+    highres = build_highres_traces(rec, electrodes, bin_ms=bin_ms, smooth_sigma_ms=smooth_ms)
+
+    expected_rates = []
+    expected_presence = []
+    for electrode in electrodes:
+        times = np.sort(
+            spikes["time"][
+                (spikes["electrode"] == electrode)
+                & (spikes["time"] >= rec.start_time)
+                & (spikes["time"] <= rec.end_time)
+            ]
+        )
+        counts, _ = np.histogram(times, bins=bin_edges)
+        expected_presence.append(counts > 0)
+        expected_rates.append(
+            gaussian_filter1d(
+                counts.astype(np.float32) / np.float32(dt),
+                sigma=smooth_ms / bin_ms,
+                mode="nearest",
+                output=np.float32,
+            )
+        )
+        np.testing.assert_allclose(highres.spikes_by_electrode[int(electrode)], times)
+
+    np.testing.assert_allclose(highres.per_electrode_rate_hz, np.vstack(expected_rates))
+    np.testing.assert_array_equal(highres.spike_presence, np.vstack(expected_presence))
 
 
 def fixture_aligned_peak_map_events():
