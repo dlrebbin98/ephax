@@ -14,10 +14,10 @@ class NatureFigureStyle:
     """Nature-branded research figure defaults in final-size points/mm."""
 
     font_family: tuple[str, ...] = ("Arial", "Helvetica", "DejaVu Sans")
-    font_size: float = 5.0
+    font_size: float = 5.5
     min_font_size: float = 5.0
     max_font_size: float = 7.0
-    panel_label_size: float = 7.0
+    panel_label_size: float = 6.0
     axes_linewidth: float = 0.4
     tick_linewidth: float = 0.4
     major_tick_size: float = 1.2
@@ -40,7 +40,7 @@ FONT_SIZES = {
     "small": 5.0,
     "base": NATURE_STYLE.font_size,
     "label": NATURE_STYLE.font_size,
-    "title": 5.5,
+    "title": 6,
     "panel_label": NATURE_STYLE.panel_label_size,
 }
 LINE_WIDTHS = {
