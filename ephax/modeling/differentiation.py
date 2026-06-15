@@ -22,6 +22,8 @@ class HDMEADifferentiationConfig:
     v_ax_m_s: float = 0.8
     lambda_eph_um: float = 1e4
     axonal_decay_um: float = 100.0
+    near_field_decay_um: float = 100.0
+    near_field_relative_amplitude: float = 3.0
     ephaptic_correlation_gain: float | None = None
     subsample_size: int = 20
     random_seed: int = 0
@@ -92,8 +94,20 @@ def ephaptic_correlation_kernel(r_um, config: HDMEADifferentiationConfig):
     return config.correlation_gain * raw_correlation_wave(r_um, config) * np.exp(-np.asarray(r_um, dtype=float) / float(config.lambda_eph_um)) ** 2
 
 
-def axonal_kernel(r_um, config: HDMEADifferentiationConfig):
+def near_field_kernel(r_um, config: HDMEADifferentiationConfig):
+    return float(config.near_field_relative_amplitude) * np.exp(-np.asarray(r_um, dtype=float) / float(config.near_field_decay_um))
+
+
+def axonal_component_kernel(r_um, config: HDMEADifferentiationConfig):
     return np.exp(-np.asarray(r_um, dtype=float) / float(config.axonal_decay_um))
+
+
+def axonal_kernel(r_um, config: HDMEADifferentiationConfig):
+    return near_field_kernel(r_um, config) + axonal_component_kernel(r_um, config)
+
+
+def ephaptic_axonal_kernel(r_um, config: HDMEADifferentiationConfig):
+    return near_field_kernel(r_um, config) + ephaptic_correlation_kernel(r_um, config)
 
 
 def build_kernel_curves(grid: pd.DataFrame, config: HDMEADifferentiationConfig, *, n_points: int = 2000) -> dict[str, np.ndarray | float]:
@@ -110,12 +124,16 @@ def build_kernel_curves(grid: pd.DataFrame, config: HDMEADifferentiationConfig, 
     )
     if not np.allclose(ephaptic, expected):
         raise AssertionError("ephaptic kernel no longer matches ephax.modeling.ephaptic.correlation_function.")
+    near_field = near_field_kernel(r_um, config)
+    axonal_component = axonal_component_kernel(r_um, config)
     axonal = axonal_kernel(r_um, config)
     return {
         "r_um": r_um,
+        "near_field": near_field,
+        "axonal_component": axonal_component,
         "axonal": axonal,
         "ephaptic": ephaptic,
-        "ephaptic_axonal": axonal + ephaptic,
+        "ephaptic_axonal": ephaptic_axonal_kernel(r_um, config),
         "wavelength_um": config.wavelength_um,
     }
 
@@ -157,11 +175,17 @@ def make_plating_mask(grid: pd.DataFrame, config: HDMEADifferentiationConfig, ra
 def interaction_scores(sample_coords, config: HDMEADifferentiationConfig, *, include_correlation: bool):
     distances_um = cdist(sample_coords, sample_coords)
     np.fill_diagonal(distances_um, np.nan)
-    axonal_scores = np.nansum(axonal_kernel(distances_um, config), axis=1)
+    near_field_scores = np.nansum(near_field_kernel(distances_um, config), axis=1)
+    axonal_component_scores = np.nansum(axonal_component_kernel(distances_um, config), axis=1)
     if not include_correlation:
-        return axonal_scores, axonal_scores, np.zeros_like(axonal_scores)
+        return (
+            near_field_scores + axonal_component_scores,
+            near_field_scores,
+            axonal_component_scores,
+            np.zeros_like(axonal_component_scores),
+        )
     corr_scores = np.nansum(ephaptic_correlation_kernel(distances_um, config), axis=1)
-    return axonal_scores + corr_scores, axonal_scores, corr_scores
+    return near_field_scores + corr_scores, near_field_scores, axonal_component_scores, corr_scores
 
 
 def run_apoptosis_simulation(
@@ -199,7 +223,7 @@ def run_apoptosis_simulation(
             active_indices = np.flatnonzero(active)
             sample_size = min(int(config.subsample_size), active_before)
             sample_indices = rng.choice(active_indices, size=sample_size, replace=False)
-            scores, axonal_scores, corr_scores = interaction_scores(
+            scores, near_field_scores, axonal_scores, corr_scores = interaction_scores(
                 coords_um[sample_indices],
                 config,
                 include_correlation=include_correlation,
@@ -230,6 +254,7 @@ def run_apoptosis_simulation(
                     "score_mean": float(np.mean(scores)),
                     "score_median": float(np.median(scores)),
                     "score_max": float(np.max(scores)),
+                    "near_field_score_mean": float(np.mean(near_field_scores)),
                     "axonal_score_mean": float(np.mean(axonal_scores)),
                     "correlation_score_mean": float(np.mean(corr_scores)),
                 }

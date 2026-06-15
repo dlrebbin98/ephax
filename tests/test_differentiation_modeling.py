@@ -49,5 +49,10 @@ def test_hd_mea_differentiation_kernels_match_ephaptic_reference():
         cfg.v_ax_um_s,
         cfg.lambda_eph_um,
     )
+    expected_near_field = cfg.near_field_relative_amplitude * np.exp(-kernels["r_um"] / cfg.near_field_decay_um)
+    expected_axonal_component = np.exp(-kernels["r_um"] / cfg.axonal_decay_um)
     assert np.allclose(kernels["ephaptic"], expected_ephaptic)
-    assert np.allclose(kernels["ephaptic_axonal"], kernels["axonal"] + kernels["ephaptic"])
+    assert np.allclose(kernels["near_field"], expected_near_field)
+    assert np.allclose(kernels["axonal_component"], expected_axonal_component)
+    assert np.allclose(kernels["axonal"], kernels["near_field"] + kernels["axonal_component"])
+    assert np.allclose(kernels["ephaptic_axonal"], kernels["near_field"] + kernels["ephaptic"])
