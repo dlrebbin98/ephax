@@ -94,6 +94,284 @@ def load_wave_result_cache(cache_dir: str | Path) -> WaveAnalysisResult | None:
     )
 
 
+def add_wave_direction_balance_columns(summary_df: pd.DataFrame) -> pd.DataFrame:
+    """Add signed and absolute direction-balance summaries to wave rows."""
+    df = summary_df.copy()
+    if df.empty:
+        return df
+    left = df.get("n_events_left_to_right", pd.Series(0, index=df.index)).astype(float)
+    right = df.get("n_events_right_to_left", pd.Series(0, index=df.index)).astype(float)
+    total = left + right
+    df["direction_total_events"] = total.astype(int)
+    df["direction_balance_signed"] = np.where(total > 0, (left - right) / total, np.nan)
+    df["direction_imbalance_abs"] = np.abs(df["direction_balance_signed"])
+    return df
+
+
+def wave_fit_diagnostics(result: WaveAnalysisResult) -> dict[str, float]:
+    """Return wave fit summary plus correlation and weighted R-squared diagnostics."""
+    fit = result.fit_summary.iloc[0].to_dict()
+    bins = result.bin_summary.copy()
+    if bins.empty:
+        fit.update({"fit_r_value": np.nan, "fit_r_squared": np.nan, "fit_weighted_r_squared": np.nan})
+        return fit
+    x = bins["origin_x_um"].to_numpy(dtype=float)
+    y = bins["mean_peak_time_ms"].to_numpy(dtype=float)
+    slope = float(fit.get("slope_ms_per_um", np.nan))
+    intercept = float(fit.get("intercept_ms", np.nan))
+    pred = slope * x + intercept
+    valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(pred)
+    if valid.sum() < 2:
+        fit.update({"fit_r_value": np.nan, "fit_r_squared": np.nan, "fit_weighted_r_squared": np.nan})
+        return fit
+
+    fit["fit_r_value"] = float(np.corrcoef(x[valid], y[valid])[0, 1])
+    fit["fit_r_squared"] = float(fit["fit_r_value"] ** 2)
+    if "n_observations" in bins:
+        weights = np.sqrt(np.maximum(1.0, bins.loc[valid, "n_observations"].to_numpy(dtype=float)))
+    else:
+        weights = np.ones(valid.sum(), dtype=float)
+    y_valid = y[valid]
+    pred_valid = pred[valid]
+    y_bar = float(np.average(y_valid, weights=weights))
+    ss_res = float(np.sum(weights * (y_valid - pred_valid) ** 2))
+    ss_tot = float(np.sum(weights * (y_valid - y_bar) ** 2))
+    fit["fit_weighted_r_squared"] = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
+    return fit
+
+
+def summarize_wave_recording_result(
+    recording_id: str,
+    well: int,
+    div: int,
+    result: WaveAnalysisResult,
+    settings: dict[str, object],
+    *,
+    n_refs: int | float | None = None,
+    n_bursts: int | float | None = None,
+) -> dict[str, object]:
+    """Create one compact per-recording summary row from a wave result."""
+    fit = result.fit_summary.iloc[0]
+
+    def _float_or_nan(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return np.nan
+
+    row = {
+        "recording_id": str(recording_id),
+        "well": int(well),
+        "div": int(div),
+        "wave_peak_search_start_ms": _float_or_nan(settings.get("peak_search_start_ms", np.nan)),
+        "wave_peak_search_stop_ms": _float_or_nan(settings.get("peak_search_stop_ms", np.nan)),
+        "n_events_used": int(fit.get("n_events_used", 0)),
+        "n_events_left_to_right": int(fit.get("n_events_left_to_right", 0)),
+        "n_events_right_to_left": int(fit.get("n_events_right_to_left", 0)),
+        "implied_speed_um_per_ms": _float_or_nan(fit.get("implied_speed_um_per_ms", np.nan)),
+        "bootstrap_speed_mean_um_per_ms": _float_or_nan(fit.get("bootstrap_speed_mean_um_per_ms", np.nan)),
+        "bootstrap_speed_median_um_per_ms": _float_or_nan(fit.get("bootstrap_speed_median_um_per_ms", np.nan)),
+        "bootstrap_speed_ci_low_um_per_ms": _float_or_nan(fit.get("bootstrap_speed_ci_low_um_per_ms", np.nan)),
+        "bootstrap_speed_ci_high_um_per_ms": _float_or_nan(fit.get("bootstrap_speed_ci_high_um_per_ms", np.nan)),
+        "n_bins_retained": _float_or_nan(fit.get("n_bins_retained", np.nan)),
+    }
+    if n_refs is not None:
+        row["n_refs"] = int(n_refs) if np.isfinite(float(n_refs)) else np.nan
+    if n_bursts is not None:
+        row["n_bursts_or_cached_events"] = int(n_bursts) if np.isfinite(float(n_bursts)) else np.nan
+    return row
+
+
+def load_cached_wave_for_recording(
+    cache_root: str | Path,
+    recording_id: str,
+    setting_candidates: list[dict[str, object]] | tuple[dict[str, object], ...],
+) -> tuple[WaveAnalysisResult | None, dict[str, object] | None]:
+    """Load the first compatible cached wave result for one recording."""
+    for settings in setting_candidates:
+        cached = load_wave_result_cache(wave_cache_dir(cache_root, recording_id, **settings))
+        if cached is not None:
+            return cached, dict(settings)
+    return None, None
+
+
+def load_cached_aggregate_wave(
+    cache_root: str | Path,
+    aggregate_id: str,
+    setting_candidates: list[dict[str, object]] | tuple[dict[str, object], ...],
+) -> tuple[WaveAnalysisResult | None, dict[str, object] | None]:
+    """Load the first compatible cached aggregate wave result."""
+    return load_cached_wave_for_recording(cache_root, aggregate_id, setting_candidates)
+
+
+def wave_settings_from_config(
+    *,
+    x_bin_um: float,
+    peak_search_start_ms: float,
+    peak_search_stop_ms: float,
+    trace_smooth_sigma_ms: float,
+    bin_ms: float,
+    min_electrodes_per_bin: int,
+    min_events_per_bin: int,
+    bootstrap_reps: int,
+    random_seed: int,
+) -> dict[str, object]:
+    """Build a wave-analysis settings dictionary compatible with existing caches."""
+    return {
+        "x_bin_um": x_bin_um,
+        "peak_search_start_ms": peak_search_start_ms,
+        "peak_search_stop_ms": peak_search_stop_ms,
+        "trace_smooth_sigma_ms": trace_smooth_sigma_ms,
+        "bin_ms": bin_ms,
+        "min_electrodes_per_bin": min_electrodes_per_bin,
+        "min_events_per_bin": min_events_per_bin,
+        "bootstrap_reps": bootstrap_reps,
+        "random_seed": random_seed,
+    }
+
+
+def supplementary_wave_setting_candidates(settings: dict[str, object]) -> list[dict[str, object]]:
+    """Return current wave settings followed by the historical peak-window fallback."""
+    current = dict(settings)
+    fallback = dict(current)
+    fallback["peak_search_start_ms"] = -15.0
+    fallback["peak_search_stop_ms"] = 20.0
+    return [current, fallback]
+
+
+def load_cached_wave_for_div(
+    div: int,
+    *,
+    recording_spec,
+    wells,
+    wave_cache_root: str | Path,
+    settings: dict[str, object],
+) -> dict[str, object]:
+    """Load cached per-recording and aggregate wave summaries for one DIV."""
+    candidates = supplementary_wave_setting_candidates(settings)
+    aggregate_id = f"aggregate_stim_removal_null_wells{'-'.join(map(str, wells))}_DIVs{int(div)}"
+    aggregate_result, aggregate_settings = load_cached_aggregate_wave(wave_cache_root, aggregate_id, candidates)
+
+    rows = []
+    per_recording = []
+    for well in wells:
+        spec = recording_spec(well, div)
+        cached, used_settings = load_cached_wave_for_recording(wave_cache_root, spec["recording_id"], candidates)
+        if cached is None or used_settings is None:
+            continue
+        rows.append(summarize_wave_recording_result(spec["recording_id"], int(well), int(div), cached, used_settings))
+        per_recording.append(cached.fit_summary.assign(recording_id=spec["recording_id"]))
+
+    return {
+        "result": aggregate_result,
+        "summary": pd.DataFrame(rows),
+        "per_recording_fit": pd.concat(per_recording, ignore_index=True) if per_recording else pd.DataFrame(),
+        "aggregate_wave_peak_search_start_ms": np.nan
+        if aggregate_settings is None
+        else float(aggregate_settings["peak_search_start_ms"]),
+        "aggregate_wave_peak_search_stop_ms": np.nan
+        if aggregate_settings is None
+        else float(aggregate_settings["peak_search_stop_ms"]),
+    }
+
+
+def build_aggregate_wave_for_div(
+    div: int,
+    *,
+    recording_spec,
+    load_recording,
+    select_refs,
+    wells,
+    wave_cache_root: str | Path,
+    settings: dict[str, object],
+    burst_config,
+    force_wave: bool = False,
+    force_aggregate: bool = False,
+) -> dict[str, object]:
+    """Compute or load per-recording and aggregate wave results for one DIV."""
+    results_by_recording = []
+    rows = []
+    for well in wells:
+        spec = recording_spec(well, div)
+        recording_id = spec["recording_id"]
+        cached = None if force_wave else load_wave_result_cache(wave_cache_dir(wave_cache_root, recording_id, **settings))
+        if cached is None:
+            ds = load_recording(spec)
+            rec = ds.recordings[0]
+            refs = select_refs(ds)
+            aligned, intermediates = build_burst_peak_aligned_events(
+                rec,
+                refs,
+                ifr_grid_hz=burst_config.ifr_grid_hz,
+                smooth_sigma_sec=burst_config.smooth_sigma_sec,
+                highres_bin_ms=burst_config.highres_bin_ms,
+                highres_smooth_sigma_ms=burst_config.highres_smooth_sigma_ms,
+                network_bin_ms=burst_config.network_bin_ms,
+                high_activity_mad_scale=burst_config.high_activity_mad_scale,
+                high_activity_min_duration_ms=burst_config.high_activity_min_duration_ms,
+                high_activity_max_gap_bins=burst_config.high_activity_max_gap_bins,
+                network_min_participation_fraction=burst_config.network_min_participation_fraction,
+                network_min_duration_ms=burst_config.network_min_duration_ms,
+            )
+            if len(pd.DataFrame(aligned.valid_anchors)) == 0:
+                print(f"Skipping {recording_id}: no valid aligned burst anchors")
+                continue
+            result = compute_or_load_wave_result(
+                recording_id,
+                aligned,
+                rec.layout,
+                cache_root=wave_cache_root,
+                force=force_wave,
+                **settings,
+            )
+            n_refs = int(len(refs))
+            n_bursts = int(len(intermediates["burst_epochs"]))
+        else:
+            result = cached
+            n_refs = np.nan
+            n_bursts = int(result.fit_summary.iloc[0]["n_events_used"])
+
+        results_by_recording.append((recording_id, result))
+        rows.append(
+            summarize_wave_recording_result(
+                recording_id,
+                int(well),
+                int(div),
+                result,
+                settings,
+                n_refs=n_refs,
+                n_bursts=n_bursts,
+            )
+        )
+
+    if not results_by_recording:
+        raise ValueError(f"No aggregate wave results were available for DIV {div}.")
+
+    aggregate_id = f"aggregate_stim_removal_null_wells{'-'.join(map(str, wells))}_DIVs{int(div)}"
+    aggregate_cache_dir = wave_cache_dir(wave_cache_root, aggregate_id, **settings)
+    aggregate_result = None if force_aggregate else load_wave_result_cache(aggregate_cache_dir)
+    if aggregate_result is None:
+        aggregate_result, per_recording_fit = aggregate_wave_results(
+            results_by_recording,
+            x_bin_um=float(settings["x_bin_um"]),
+            min_events_per_bin=int(settings["min_events_per_bin"]),
+            bootstrap_reps=int(settings["bootstrap_reps"]),
+            random_seed=int(settings["random_seed"]),
+        )
+        save_wave_result_cache(aggregate_result, aggregate_cache_dir)
+    else:
+        per_recording_fit = pd.concat(
+            [result.fit_summary.assign(recording_id=recording_id) for recording_id, result in results_by_recording],
+            ignore_index=True,
+        )
+
+    return {
+        "result": aggregate_result,
+        "summary": pd.DataFrame(rows),
+        "per_recording_fit": per_recording_fit,
+    }
+
+
 def compute_or_load_wave_result(
     recording_id: str,
     aligned: AlignedBurstEvents,

@@ -14,6 +14,7 @@ from .burst import (
     plot_population_ifr_summary,
     population_ifr_summary_axes_factory,
     save_average_hex_gif,
+    save_event_hex_gif,
     select_high_activity_windows,
 )
 from .cofiring import draw_cofiring_heatmap, plot_cofiring_heatmap
@@ -106,6 +107,7 @@ __all__ = [
     "plot_population_ifr_summary",
     "population_ifr_summary_axes_factory",
     "save_average_hex_gif",
+    "save_event_hex_gif",
     "select_high_activity_windows",
     "truncate_colormap",
 ]

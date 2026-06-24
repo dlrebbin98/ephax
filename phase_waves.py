@@ -8,6 +8,7 @@ from typing import Iterable
 
 import h5py
 import numpy as np
+from scipy.io import savemat
 from scipy.optimize import minimize
 from scipy.ndimage import uniform_filter1d
 from scipy.signal import butter, hilbert, resample_poly, sosfiltfilt, welch
@@ -248,6 +249,114 @@ def load_chunk(
         sorted_mapping = {name: np.asarray(values)[keep][order] for name, values in mapping.items()}
 
     return data, coords_mm, fs_raw, sorted_mapping
+
+
+def lowpass_filter_voltage(
+    data: np.ndarray,
+    fs_raw: float,
+    lowpass_hz: float,
+    *,
+    order: int = 4,
+    max_channels_per_block: int = 128,
+) -> np.ndarray:
+    """Apply a zero-phase low-pass filter to voltage data shaped as time x channels."""
+    data = np.asarray(data)
+    if data.ndim != 2:
+        raise ValueError("data must have shape (time, channels)")
+    if data.shape[0] == 0 or data.shape[1] == 0:
+        return np.asarray(data, dtype=np.float32)
+    if not (0.0 < float(lowpass_hz) < 0.5 * float(fs_raw)):
+        raise ValueError("lowpass_hz must satisfy 0 < lowpass_hz < fs_raw/2")
+
+    sos = butter(int(order), float(lowpass_hz), btype="lowpass", fs=float(fs_raw), output="sos")
+    blocks: list[np.ndarray] = []
+    for start in range(0, data.shape[1], int(max_channels_per_block)):
+        stop = min(data.shape[1], start + int(max_channels_per_block))
+        block = np.asarray(data[:, start:stop], dtype=np.float32)
+        block = np.nan_to_num(block, copy=False)
+        blocks.append(sosfiltfilt(sos, block, axis=0).astype(np.float32, copy=False))
+    return np.concatenate(blocks, axis=1)
+
+
+def export_first_high_activity_raw_mat(
+    file_path: str | Path,
+    dataset: str,
+    high_activity_epochs,
+    output_path: str | Path,
+    *,
+    lowpass_hz: float = 500.0,
+    source_label: str = "",
+    well: int | None = None,
+    div: int | None = None,
+    overwrite: bool = True,
+    filter_order: int = 4,
+    max_channels_per_block: int = 128,
+) -> dict[str, object]:
+    """Export the first high-activity raw LFP segment as a MATLAB-readable MAT file.
+
+    The saved voltage matrix is shaped as samples x channels and contains the
+    zero-phase low-pass filtered raw voltage.
+    """
+    output_path = Path(output_path)
+    if output_path.exists() and not bool(overwrite):
+        return {"path": str(output_path), "written": False, "reason": "exists"}
+    if high_activity_epochs is None or len(high_activity_epochs) == 0:
+        raise ValueError("No high-activity epochs detected; cannot export first high-activity raw LFP segment.")
+
+    first_high_activity = high_activity_epochs.sort_values("start_time_s").iloc[0]
+    export_start_s = float(first_high_activity["start_time_s"])
+    export_stop_s = float(first_high_activity["end_time_s"])
+    info = inspect_file(file_path, dataset)
+    fs_raw = float(info["fs_raw"])
+    export_start_frame = int(round(export_start_s * fs_raw))
+    export_n_frames = max(1, int(round((export_stop_s - export_start_s) * fs_raw)))
+    raw_export, coords_export_mm, fs_export, mapping_export = load_chunk(
+        file_path,
+        dataset,
+        export_start_frame,
+        export_n_frames,
+    )
+    filtered_export = lowpass_filter_voltage(
+        raw_export,
+        fs_export,
+        lowpass_hz,
+        order=filter_order,
+        max_channels_per_block=max_channels_per_block,
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    mat_payload = {
+        "voltage_lowpass": filtered_export,
+        "t_s": export_start_s + np.arange(filtered_export.shape[0], dtype=np.float64) / float(fs_export),
+        "coords_mm": coords_export_mm,
+        "fs_raw": float(fs_export),
+        "lowpass_hz": float(lowpass_hz),
+        "filter_order": int(filter_order),
+        "start_time_s": export_start_s,
+        "stop_time_s": export_stop_s,
+        "start_frame": int(export_start_frame),
+        "dataset": str(dataset),
+        "source_file": str(file_path),
+        "source_label": str(source_label),
+        "channel": np.asarray(mapping_export["channel"]),
+        "electrode": np.asarray(mapping_export["electrode"]),
+        "x_um": np.asarray(mapping_export["x"]),
+        "y_um": np.asarray(mapping_export["y"]),
+    }
+    if well is not None:
+        mat_payload["well"] = int(well)
+    if div is not None:
+        mat_payload["DIV"] = int(div)
+    savemat(output_path, mat_payload, do_compression=True)
+    return {
+        "path": str(output_path),
+        "written": True,
+        "shape": tuple(int(v) for v in filtered_export.shape),
+        "fs_raw": float(fs_export),
+        "lowpass_hz": float(lowpass_hz),
+        "start_time_s": export_start_s,
+        "stop_time_s": export_stop_s,
+    }
 
 
 def _resample_ratio(fs_raw: float, fs_ds: float) -> tuple[int, int]:

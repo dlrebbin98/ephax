@@ -21,6 +21,10 @@ def plot_population_ifr_summary(
     mean_title: str = "Population mean IFR",
     mean_log_scale: bool = False,
     smooth_sigma_sec: float | None = None,
+    time_range: tuple[float, float] | None = None,
+    heatmap_vmin: float | None = None,
+    heatmap_vmax: float | None = None,
+    heatmap_quantile: float = 0.01,
     mode="standalone",
     figsize: str | tuple[float, float] = "wide_single",
 ):
@@ -35,6 +39,10 @@ def plot_population_ifr_summary(
         mean_title=mean_title,
         mean_log_scale=mean_log_scale,
         smooth_sigma_sec=smooth_sigma_sec,
+        time_range=time_range,
+        heatmap_vmin=heatmap_vmin,
+        heatmap_vmax=heatmap_vmax,
+        heatmap_quantile=heatmap_quantile,
         compact=defaults.compact,
         show_colorbar=defaults.show_colorbar,
         show_legend=defaults.show_legend,
@@ -51,6 +59,10 @@ def draw_population_ifr_summary(
     show_titles: bool | None = None,
     mean_log_scale: bool = False,
     smooth_sigma_sec: float | None = None,
+    time_range: tuple[float, float] | None = None,
+    heatmap_vmin: float | None = None,
+    heatmap_vmax: float | None = None,
+    heatmap_quantile: float = 0.01,
     compact: bool = False,
     show_colorbar: bool | None = True,
     show_legend: bool | None = False,
@@ -60,11 +72,14 @@ def draw_population_ifr_summary(
     ax_heatmap, ax_mean, cax = _unpack_population_axes(axes)
     if show_titles is None:
         show_titles = not compact
+    population = _slice_population_ifr(population, time_range)
     positive = population.ifr_matrix[population.ifr_matrix > 0]
     if positive.size == 0:
         raise ValueError("IFR matrix contains no positive values for log-scale plotting.")
-    vmin = max(1e-3, float(np.quantile(positive, 0.01)))
-    vmax = max(float(positive.max()), vmin * (1.0 + 1e-6))
+    quantile = float(np.clip(heatmap_quantile, 0.0, 1.0))
+    vmin = max(1e-3, float(np.quantile(positive, quantile))) if heatmap_vmin is None else float(heatmap_vmin)
+    vmax = float(positive.max()) if heatmap_vmax is None else float(heatmap_vmax)
+    vmax = max(vmax, vmin * (1.0 + 1e-6))
 
     im = ax_heatmap.imshow(
         np.clip(population.ifr_matrix, vmin, vmax),
@@ -94,7 +109,7 @@ def draw_population_ifr_summary(
         ax_mean.plot(population.time_grid, np.clip(population.mean_ifr, floor, None), color="0.70", lw=LINE_WIDTHS["thin"], label="Population mean IFR")
         ax_mean.plot(population.time_grid, np.clip(population.mean_ifr_smooth, floor, None), color="black", lw=LINE_WIDTHS["emphasis"], label=smooth_label)
         ax_mean.set_yscale("log")
-        ax_mean.set_ylabel("Mean IFR (Hz))")
+        ax_mean.set_ylabel("Mean IFR (Hz)")
     else:
         ax_mean.plot(population.time_grid, population.mean_ifr, color="0.70", lw=LINE_WIDTHS["thin"], label="Population mean IFR")
         ax_mean.plot(population.time_grid, population.mean_ifr_smooth, color="black", lw=LINE_WIDTHS["emphasis"], label=smooth_label)
@@ -112,6 +127,23 @@ def draw_population_ifr_summary(
         "colorbar_label": colorbar_label if colorbar_label is not None else ("IFR (Hz)" if compact else "Instantaneous firing rate (Hz, log scale)"),
         "mean": ax_mean,
     }
+
+
+def _slice_population_ifr(population: PopulationIFR, time_range: tuple[float, float] | None) -> PopulationIFR:
+    if time_range is None:
+        return population
+    start_s, stop_s = map(float, time_range)
+    mask = (population.time_grid >= start_s) & (population.time_grid <= stop_s)
+    if np.count_nonzero(mask) < 2:
+        raise ValueError("time_range must include at least two population IFR samples.")
+    return PopulationIFR(
+        time_grid=population.time_grid[mask],
+        electrodes=population.electrodes,
+        ifr_matrix=population.ifr_matrix[:, mask],
+        mean_ifr=population.mean_ifr[mask],
+        mean_ifr_smooth=population.mean_ifr_smooth[mask],
+        per_electrode_mean_hz=population.per_electrode_mean_hz,
+    )
 
 
 def population_ifr_summary_axes_factory(fig, subplotspec):
@@ -825,6 +857,108 @@ def save_average_hex_gif(
             ax.set_box_aspect(box_aspect)
             ax.set_title(f"Hex-binned average electrode IFR | t = {aligned.relative_time_ms[time_index]:.0f} ms")
             _format_log_colorbar(fig.colorbar(hb, ax=ax), "Electrode IFR (Hz, log scale)")
+            buf = BytesIO()
+            fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+            buf.seek(0)
+            writer.append_data(imageio.imread(buf))
+            buf.close()
+            plt.close(fig)
+    return output_path
+
+
+def save_event_hex_gif(
+    aligned: AlignedBurstEvents,
+    layout: dict | pd.DataFrame,
+    window_idx: int,
+    output_path: str | Path,
+    *,
+    title: str | None = None,
+    frame_step_ms: float = 2.0,
+    bin_ms: float | None = None,
+    gridsize: int = 35,
+    xlim: tuple[float, float] = (0.0, 3850.0),
+    ylim: tuple[float, float] = (0.0, 2100.0),
+    vmin: float | None = None,
+    vmax: float | None = None,
+    scale_values: np.ndarray | None = None,
+    cmap: str = "magma",
+    duration: float = 0.14,
+    dpi: int = 140,
+    show_spike_outline: bool = True,
+) -> Path:
+    """Save a hex-binned GIF for one aligned burst event."""
+    window_idx = int(window_idx)
+    if window_idx < 0 or window_idx >= aligned.aligned_rate.shape[0]:
+        raise IndexError("window_idx is outside the aligned event tensor.")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    layout_df = pd.DataFrame(layout).drop_duplicates("electrode")
+    layout_df = layout_df[layout_df["electrode"].isin(aligned.electrodes)].copy()
+    x = layout_df["x"].to_numpy(dtype=float)
+    y = layout_df["y"].to_numpy(dtype=float)
+    electrodes = layout_df["electrode"].to_numpy(dtype=int)
+    idx = np.array([np.flatnonzero(aligned.electrodes == int(el))[0] for el in electrodes], dtype=int)
+
+    event_rate = aligned.aligned_rate[window_idx]
+    event_spikes = aligned.aligned_spikes[window_idx]
+    scale_source = event_rate if scale_values is None else np.asarray(scale_values, dtype=float)
+    positive = scale_source[np.isfinite(scale_source) & (scale_source > 0)]
+    if positive.size == 0:
+        raise ValueError("No positive aligned rates were available for hex GIF scaling.")
+    resolved_vmin = max(1e-2, float(np.quantile(positive, 0.05))) if vmin is None else float(vmin)
+    resolved_vmax = max(resolved_vmin * 10.0, float(np.quantile(positive, 0.995))) if vmax is None else float(vmax)
+    resolved_vmax = max(resolved_vmax, resolved_vmin * (1.0 + 1e-6))
+
+    if bin_ms is None:
+        diffs = np.diff(np.asarray(aligned.relative_time_ms, dtype=float))
+        bin_ms = float(np.nanmedian(diffs)) if diffs.size else 1.0
+    frame_step = max(1, int(round(float(frame_step_ms) / max(float(bin_ms), 1e-12))))
+    frame_indices = np.arange(0, len(aligned.relative_time_ms), frame_step, dtype=int)
+
+    extent = (*xlim, *ylim)
+    box_aspect = (ylim[1] - ylim[0]) / max(xlim[1] - xlim[0], 1e-9)
+    with imageio.get_writer(output_path, mode="I", duration=duration) as writer:
+        for time_index in frame_indices:
+            fig, ax = plt.subplots(figsize=(7.4, 4.6), constrained_layout=True)
+            hb = ax.hexbin(
+                x,
+                y,
+                C=np.clip(event_rate[idx, int(time_index)], resolved_vmin, resolved_vmax),
+                reduce_C_function=np.mean,
+                gridsize=gridsize,
+                cmap=cmap,
+                mincnt=1,
+                linewidths=0.35,
+                edgecolors="black",
+                norm=LogNorm(vmin=resolved_vmin, vmax=resolved_vmax),
+                extent=extent,
+            )
+            spike_mask = event_spikes[idx, int(time_index)]
+            if show_spike_outline and np.any(spike_mask):
+                spike_hb = ax.hexbin(
+                    x[spike_mask],
+                    y[spike_mask],
+                    gridsize=gridsize,
+                    mincnt=1,
+                    linewidths=0.35,
+                    edgecolors="white",
+                    facecolors="none",
+                    extent=extent,
+                )
+                spike_hb.set_facecolor("none")
+                spike_hb.set_edgecolor("white")
+                spike_hb.set_linewidth(0.5)
+            ax.set_facecolor("black")
+            ax.set_xlim(*xlim)
+            ax.set_ylim(*ylim)
+            ax.set_xlabel("x (um)")
+            ax.set_ylabel("y (um)")
+            ax.set_aspect("equal", adjustable="box")
+            ax.set_box_aspect(box_aspect)
+            resolved_title = title or f"Aligned event {window_idx}"
+            ax.set_title(f"{resolved_title} | t = {aligned.relative_time_ms[time_index]:.0f} ms")
+            _format_log_colorbar(fig.colorbar(hb, ax=ax), "Instantaneous firing rate (Hz, log scale)")
             buf = BytesIO()
             fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
             buf.seek(0)

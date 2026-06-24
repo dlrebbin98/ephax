@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -10,6 +12,34 @@ from scipy.stats import gaussian_kde
 
 from ..models import AlignedBurstEvents, HighResTraces, NetworkActivityState, PopulationIFR
 from .ifr import calculate_ifr
+
+
+@dataclass(frozen=True)
+class BurstActivityConfig:
+    """Shared parameters for burst-state analyses across recordings."""
+
+    wells: tuple[int, ...]
+    start_sec: float = 0.0
+    end_sec: float = 600.0
+    ifr_grid_hz: float = 50.0
+    ifr_max_hz: float = 1000.0
+    smooth_sigma_sec: float = 0.15
+    highres_bin_ms: float = 1.0
+    highres_smooth_sigma_ms: float = 3.0
+    network_bin_ms: float = 10.0
+    high_activity_mad_scale: float = 3.0
+    high_activity_min_duration_ms: float = 30.0
+    high_activity_max_gap_bins: int = 0
+    network_min_participation_fraction: float = 0.05
+    network_min_duration_ms: float = 20.0
+
+
+def slim_activity_state(activity: NetworkActivityState):
+    """Return the compact activity fields needed by burst-window plots."""
+    return SimpleNamespace(
+        time_centers_s=np.asarray(activity.time_centers_s, dtype=float),
+        participation_fraction=np.asarray(activity.participation_fraction, dtype=float),
+    )
 
 
 def build_population_ifr(
@@ -1162,6 +1192,210 @@ def order_aligned_rate_by_x(aligned: AlignedBurstEvents, layout: dict | pd.DataF
     layout_df = layout_df.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
     order_idx = np.array([np.flatnonzero(aligned.electrodes == int(el))[0] for el in layout_df["electrode"]], dtype=int)
     return layout_df, aligned.aligned_rate.mean(axis=0)[order_idx]
+
+
+def build_single_recording_burst_state(
+    recording,
+    selected_refs,
+    *,
+    config: BurstActivityConfig,
+) -> dict[str, object]:
+    """Build reusable burst-state objects for one recording."""
+    population = build_population_ifr(recording, selected_refs, grid_hz=config.ifr_grid_hz, smooth_sigma_sec=config.smooth_sigma_sec)
+    high_epochs, high_info = detect_high_activity_epochs(
+        population.time_grid,
+        population.mean_ifr_smooth,
+        mad_scale=config.high_activity_mad_scale,
+        min_duration_ms=config.high_activity_min_duration_ms,
+        max_gap_bins=config.high_activity_max_gap_bins,
+    )
+    highres = build_highres_traces(recording, selected_refs, bin_ms=config.highres_bin_ms, smooth_sigma_ms=config.highres_smooth_sigma_ms)
+    participation = build_participation_activity_state(highres, aggregation_ms=config.network_bin_ms)
+    burst_epochs = detect_participation_burst_epochs(
+        participation,
+        high_epochs,
+        min_participation_fraction=config.network_min_participation_fraction,
+        min_duration_ms=config.network_min_duration_ms,
+    )
+    return {
+        "population": population,
+        "highres": highres,
+        "high_activity_epochs": high_epochs,
+        "high_activity_info": high_info,
+        "participation_activity": participation,
+        "burst_epochs": burst_epochs,
+    }
+
+
+def build_single_recording_burst_panels(
+    well: int,
+    div: int,
+    *,
+    recording_spec,
+    load_recording,
+    select_refs,
+    config: BurstActivityConfig,
+) -> dict[str, object]:
+    """Build compact one-recording burst panel data."""
+    spec = recording_spec(well, div)
+    ds = load_recording(spec)
+    rec = ds.recordings[0]
+    refs = select_refs(ds)
+    state = build_single_recording_burst_state(rec, refs, config=config)
+    return {
+        "spec": spec,
+        "population": state["population"],
+        "high_activity_epochs": state["high_activity_epochs"],
+        "high_activity_info": state["high_activity_info"],
+        "participation_activity": slim_activity_state(state["participation_activity"]),
+        "burst_epochs": state["burst_epochs"],
+    }
+
+
+def _nanmedian(values):
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    return float(np.nanmedian(arr)) if arr.size else np.nan
+
+
+def _nanpercentile(values, q):
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    return float(np.nanpercentile(arr, q)) if arr.size else np.nan
+
+
+def _interval_fraction_ms(df, recording_duration_s):
+    if not isinstance(df, pd.DataFrame) or df.empty or "duration_ms" not in df:
+        return 0.0
+    return float(np.nansum(df["duration_ms"].to_numpy(dtype=float)) / (float(recording_duration_s) * 1000.0))
+
+
+def build_burst_activity_stats_for_div(
+    div: int,
+    *,
+    recording_spec,
+    load_recording,
+    select_refs,
+    config: BurstActivityConfig,
+) -> dict[str, pd.DataFrame]:
+    """Build per-recording and per-event burst-state statistics for one DIV."""
+    recording_rows = []
+    high_rows = []
+    burst_rows = []
+    recording_duration_s = float(config.end_sec - config.start_sec)
+    for well in config.wells:
+        spec = recording_spec(well, div)
+        ds = load_recording(spec)
+        rec = ds.recordings[0]
+        refs = select_refs(ds)
+        state = build_single_recording_burst_state(rec, refs, config=config)
+        high_epochs = state["high_activity_epochs"]
+        burst_epochs = state["burst_epochs"]
+        high_info = state["high_activity_info"]
+
+        if not high_epochs.empty:
+            high_part = high_epochs.copy()
+            high_part.insert(0, "div", int(div))
+            high_part.insert(1, "well", int(well))
+            high_rows.append(high_part)
+        if not burst_epochs.empty:
+            burst_part = burst_epochs.copy()
+            burst_part.insert(0, "div", int(div))
+            burst_part.insert(1, "well", int(well))
+            burst_rows.append(burst_part)
+
+        burst_start = burst_epochs["start_time_s"].to_numpy(dtype=float) if not burst_epochs.empty else np.array([], dtype=float)
+        burst_ibi_s = np.diff(np.sort(burst_start)) if burst_start.size >= 2 else np.array([], dtype=float)
+        recording_rows.append(
+            {
+                "div": int(div),
+                "well": int(well),
+                "recording_id": spec["recording_id"],
+                "n_refs": int(len(refs)),
+                "n_high_activity_periods": int(len(high_epochs)),
+                "n_bursts": int(len(burst_epochs)),
+                "n_high_activity_periods_per_min": float(len(high_epochs)) / (recording_duration_s / 60.0),
+                "n_bursts_per_min": float(len(burst_epochs)) / (recording_duration_s / 60.0),
+                "high_activity_threshold_hz": float(high_info["threshold_hz"]),
+                "high_activity_duration_median_ms": _nanmedian(high_epochs.get("duration_ms", [])),
+                "high_activity_duration_iqr_low_ms": _nanpercentile(high_epochs.get("duration_ms", []), 25),
+                "high_activity_duration_iqr_high_ms": _nanpercentile(high_epochs.get("duration_ms", []), 75),
+                "high_activity_time_fraction": _interval_fraction_ms(high_epochs, recording_duration_s),
+                "burst_duration_median_ms": _nanmedian(burst_epochs.get("duration_ms", [])),
+                "burst_duration_iqr_low_ms": _nanpercentile(burst_epochs.get("duration_ms", []), 25),
+                "burst_duration_iqr_high_ms": _nanpercentile(burst_epochs.get("duration_ms", []), 75),
+                "burst_time_fraction": _interval_fraction_ms(burst_epochs, recording_duration_s),
+                "burst_ibi_median_s": _nanmedian(burst_ibi_s),
+                "burst_peak_participation_median": _nanmedian(burst_epochs.get("peak_participation_fraction", [])),
+                "burst_peak_participation_iqr_low": _nanpercentile(burst_epochs.get("peak_participation_fraction", []), 25),
+                "burst_peak_participation_iqr_high": _nanpercentile(burst_epochs.get("peak_participation_fraction", []), 75),
+                "burst_peak_active_electrodes_median": _nanmedian(burst_epochs.get("peak_active_electrodes", [])),
+                "burst_participating_electrodes_median": _nanmedian(burst_epochs.get("participating_electrodes", [])),
+            }
+        )
+    return {
+        "per_recording": pd.DataFrame(recording_rows),
+        "high_activity_epochs": pd.concat(high_rows, ignore_index=True) if high_rows else pd.DataFrame(),
+        "burst_epochs": pd.concat(burst_rows, ignore_index=True) if burst_rows else pd.DataFrame(),
+    }
+
+
+def build_highest_activity_peak_time_map(
+    well: int,
+    div: int,
+    *,
+    recording_spec,
+    load_recording,
+    select_refs,
+    config: BurstActivityConfig,
+    peak_search_start_ms: float,
+    peak_search_stop_ms: float,
+) -> dict[str, object]:
+    """Build a peak-time map for the strongest burst-aligned event in one recording."""
+    from .waves import build_burst_peak_aligned_events
+
+    spec = recording_spec(well, div)
+    ds = load_recording(spec)
+    rec = ds.recordings[0]
+    refs = select_refs(ds)
+    aligned, _intermediates = build_burst_peak_aligned_events(
+        rec,
+        refs,
+        ifr_grid_hz=config.ifr_grid_hz,
+        smooth_sigma_sec=config.smooth_sigma_sec,
+        highres_bin_ms=config.highres_bin_ms,
+        highres_smooth_sigma_ms=config.highres_smooth_sigma_ms,
+        network_bin_ms=config.network_bin_ms,
+        high_activity_mad_scale=config.high_activity_mad_scale,
+        high_activity_min_duration_ms=config.high_activity_min_duration_ms,
+        high_activity_max_gap_bins=config.high_activity_max_gap_bins,
+        network_min_participation_fraction=config.network_min_participation_fraction,
+        network_min_duration_ms=config.network_min_duration_ms,
+    )
+    anchors = pd.DataFrame(aligned.valid_anchors)
+    if anchors.empty:
+        raise ValueError(f"No valid burst-peak anchors for well {well} DIV {div}.")
+    if "anchor_population_rate_hz" in anchors:
+        window_idx = int(anchors["anchor_population_rate_hz"].astype(float).idxmax())
+    elif "anchor_height_hz" in anchors:
+        window_idx = int(anchors["anchor_height_hz"].astype(float).idxmax())
+    else:
+        window_idx = 0
+    peak_map = compute_electrode_peak_time_map(
+        aligned,
+        rec.layout,
+        window_idx=window_idx,
+        peak_search_start_ms=peak_search_start_ms,
+        peak_search_stop_ms=peak_search_stop_ms,
+    )
+    return {
+        "peak_map": peak_map,
+        "window_idx": window_idx,
+        "anchor": anchors.iloc[window_idx].to_dict(),
+        "xlim": (0.0, 3850.0),
+        "ylim": (0.0, 2100.0),
+        "title": f"Well {int(well)} DIV {int(div)} peak event",
+    }
 
 
 def _fallback_anchor(time_centers, population_rate_hz, idx: int, event_idx: int, prominence_floor: float) -> dict[str, Any]:

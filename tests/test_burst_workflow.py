@@ -31,7 +31,17 @@ from ephax.metrics.burst import (
     refine_participation_burst_anchors,
     summarize_aligned_electrode_rates,
 )
-from ephax.metrics.waves import aggregate_wave_results, load_wave_result_cache, save_wave_result_cache
+from ephax.metrics.waves import (
+    add_wave_direction_balance_columns,
+    aggregate_wave_results,
+    load_cached_wave_for_recording,
+    load_wave_result_cache,
+    save_wave_result_cache,
+    summarize_wave_recording_result,
+    wave_cache_dir,
+    wave_fit_diagnostics,
+)
+from ephax.metrics.ifr import activity_wave_supplementary_tables
 from ephax.plotting.burst import (
     draw_activity_state_ifr_kde_histograms,
     draw_electrode_peak_time_map,
@@ -43,6 +53,7 @@ from ephax.plotting.burst import (
     plot_high_activity_burst_windows,
     plot_macro_burst_detector_comparison_windows,
     plot_population_ifr_summary,
+    save_event_hex_gif,
     select_high_activity_windows,
 )
 from ephax.plotting.waves import draw_wave_bootstrap_panel, draw_wave_timing_panel
@@ -582,6 +593,127 @@ def test_wave_result_cache_round_trips(tmp_path):
     assert np.allclose(loaded.bootstrap_speeds, result.bootstrap_speeds)
 
 
+def test_wave_direction_balance_columns_cover_bias_and_zero_events():
+    summary = pd.DataFrame(
+        [
+            {"n_events_left_to_right": 5, "n_events_right_to_left": 5},
+            {"n_events_left_to_right": 8, "n_events_right_to_left": 2},
+            {"n_events_left_to_right": 1, "n_events_right_to_left": 9},
+            {"n_events_left_to_right": 0, "n_events_right_to_left": 0},
+        ]
+    )
+
+    out = add_wave_direction_balance_columns(summary)
+
+    assert out["direction_total_events"].tolist() == [10, 10, 10, 0]
+    np.testing.assert_allclose(out["direction_balance_signed"].iloc[:3], [0.0, 0.6, -0.8])
+    np.testing.assert_allclose(out["direction_imbalance_abs"].iloc[:3], [0.0, 0.6, 0.8])
+    assert np.isnan(out.loc[3, "direction_balance_signed"])
+    assert np.isnan(out.loc[3, "direction_imbalance_abs"])
+
+
+def test_wave_fit_diagnostics_and_recording_summary_use_existing_result():
+    result = fixture_wave_result()
+
+    diag = wave_fit_diagnostics(result)
+    row = summarize_wave_recording_result(
+        "rec0",
+        1,
+        12,
+        result,
+        {"peak_search_start_ms": -10.0, "peak_search_stop_ms": 10.0},
+        n_refs=42,
+        n_bursts=7,
+    )
+
+    assert np.isclose(diag["fit_r_value"], 1.0)
+    assert np.isclose(diag["fit_r_squared"], 1.0)
+    assert diag["fit_weighted_r_squared"] > 0.99
+    assert row["recording_id"] == "rec0"
+    assert row["well"] == 1
+    assert row["div"] == 12
+    assert row["n_refs"] == 42
+    assert row["n_bursts_or_cached_events"] == 7
+    assert row["wave_peak_search_start_ms"] == -10.0
+
+
+def test_cached_wave_lookup_prefers_current_settings(tmp_path):
+    current = {
+        "x_bin_um": 100.0,
+        "peak_search_start_ms": -10.0,
+        "peak_search_stop_ms": 10.0,
+        "trace_smooth_sigma_ms": 2.0,
+        "bin_ms": 1.0,
+        "min_electrodes_per_bin": 1,
+        "min_events_per_bin": 1,
+        "bootstrap_reps": 20,
+        "random_seed": 0,
+    }
+    fallback = dict(current)
+    fallback["peak_search_start_ms"] = -15.0
+    fallback["peak_search_stop_ms"] = 20.0
+    save_wave_result_cache(fixture_wave_result(offset=1.0), wave_cache_dir(tmp_path, "rec0", **fallback))
+    save_wave_result_cache(fixture_wave_result(offset=2.0), wave_cache_dir(tmp_path, "rec0", **current))
+
+    loaded, settings = load_cached_wave_for_recording(tmp_path, "rec0", [current, fallback])
+
+    assert loaded is not None
+    assert settings == current
+    assert float(loaded.fit_summary.loc[0, "intercept_ms"]) == 2.0
+
+
+def test_figure2_supplementary_tables_merges_activity_and_wave_summaries():
+    result = fixture_wave_result()
+    figure2_data = {
+        "activity_stats": {
+            12: {
+                "per_recording": pd.DataFrame(
+                    [
+                        {
+                            "div": 12,
+                            "well": 0,
+                            "n_high_activity_periods_per_min": 1.0,
+                            "n_bursts_per_min": 2.0,
+                            "burst_duration_median_ms": 30.0,
+                            "burst_peak_participation_median": 0.5,
+                        }
+                    ]
+                )
+            },
+            14: {
+                "per_recording": pd.DataFrame(
+                    [
+                        {
+                            "div": 14,
+                            "well": 0,
+                            "n_high_activity_periods_per_min": 2.0,
+                            "n_bursts_per_min": 3.0,
+                            "burst_duration_median_ms": 40.0,
+                            "burst_peak_participation_median": 0.6,
+                        }
+                    ]
+                )
+            },
+        },
+        "wave": {
+            12: {"summary": pd.DataFrame([summarize_wave_recording_result("rec0", 0, 12, result, {})]), "result": result},
+            14: {"summary": pd.DataFrame([summarize_wave_recording_result("rec1", 0, 14, result, {})]), "result": result},
+        },
+    }
+
+    per_recording, by_div, wave_aggregate, significance = activity_wave_supplementary_tables(
+        figure2_data,
+        supp_divs=[12, 14],
+        bootstrap_reps=10,
+        random_seed=0,
+    )
+
+    assert "direction_imbalance_abs" in per_recording
+    assert not by_div.empty
+    assert not wave_aggregate.empty
+    assert set(significance["left_div"]) == {12}
+
+
 def test_draw_wave_panels_render_prepared_result():
     result = fixture_wave_result()
     fig, axes = plt.subplots(1, 2, figsize=(7, 3))
@@ -591,8 +723,8 @@ def test_draw_wave_panels_render_prepared_result():
 
     assert timing["mappable"] is not None
     assert "histogram" in boot["artists"]
-    assert axes[0].get_xlabel() == "Distance from inferred origin side (um)"
-    assert axes[1].get_xlabel() == "Implied propagation speed (um/ms)"
+    assert axes[0].get_xlabel() == "Distance from inferred origin side ($\\mu m$)"
+    assert axes[1].get_xlabel() == "Implied propagation speed ($\\mu m$/ms)"
     plt.close(fig)
 
 
@@ -744,6 +876,40 @@ def test_burst_plotting_consumes_metric_outputs():
     plt.close(fig4)
     plt.close(fig5)
     plt.close(fig6)
+
+
+def test_population_ifr_summary_accepts_time_range():
+    ds = fixture_burst_dataset()
+    rec = ds.recordings[0]
+    population = build_population_ifr(rec, np.array([101, 102, 103]), grid_hz=20.0, smooth_sigma_sec=0.05)
+
+    fig, axes = plot_population_ifr_summary(population, time_range=(0.8, 1.4), mean_log_scale=True)
+
+    assert axes[1].get_xlim()[0] >= 0.8
+    assert axes[1].get_xlim()[1] <= 1.4
+    plt.close(fig)
+
+
+def test_save_event_hex_gif_writes_file(tmp_path):
+    aligned, layout = fixture_aligned_peak_map_events()
+    output_path = tmp_path / "event.gif"
+
+    saved = save_event_hex_gif(
+        aligned,
+        layout,
+        0,
+        output_path,
+        frame_step_ms=10.0,
+        bin_ms=10.0,
+        xlim=(0.0, 250.0),
+        ylim=(-10.0, 50.0),
+        gridsize=6,
+        dpi=60,
+    )
+
+    assert saved == output_path
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
 
 
 def test_burst_workflow_writes_lightweight_checkpoints(monkeypatch, tmp_path):
