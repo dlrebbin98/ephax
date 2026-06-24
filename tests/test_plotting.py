@@ -5,10 +5,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from ephax import IFRAnalyzer, IFRConfig, PrepConfig
-from ephax.metrics.ifr import prepare_ifr_timeseries_panel
-from ephax.models import CofiringHeatmap, GMMFit, IFRPeaks, PopulationIFR
-from ephax.analyzers.layout_grid import GridResult
+from ephax import PrepConfig
+from ephax.metrics.ifr import IFRConfig, ifr_peaks, prepare_ifr_timeseries_panel, prepare_ifr_timeseries_panels
+from ephax.metrics.cofiring import CofiringHeatmap
+from ephax.metrics.burst import PopulationIFR
+from ephax.metrics.ifr import IFRPeaks
+from ephax.metrics.layout_grid import GridResult
+from ephax.modeling.gmm import GMMFit, fit_ifr_gmm
 from ephax.plotting.burst import (
     draw_population_ifr_summary,
     plot_population_ifr_summary,
@@ -23,6 +26,7 @@ from ephax.plotting.ifr import (
     plot_ifr_histogram,
     plot_ifr_timeseries,
     plot_ifr_timeseries_panel,
+    plot_ifr_timeseries_panels,
 )
 from ephax.plotting.layout_grid import draw_grid_avghz, draw_grid_avghz_panel, grid_avghz_panel_axes_factory
 from ephax.plotting.layout import FigureSpec, PanelSpec, add_panel_axes, make_figure_grid
@@ -260,7 +264,7 @@ def test_draw_grid_avghz_panel_uses_provided_axes():
 def test_plot_population_ifr_summary_returns_figure_axes():
     fig, (ax_heatmap, ax_mean) = plot_population_ifr_summary(fixture_population_ifr())
 
-    assert ax_heatmap.get_ylabel() == "Selected electrode rank"
+    assert ax_heatmap.get_ylabel() == "Electrode index"
     assert ax_mean.get_xlabel() == "Time (s)"
     plt.close(fig)
 
@@ -272,7 +276,7 @@ def test_draw_population_ifr_summary_uses_provided_axes():
     rendered = draw_population_ifr_summary(fixture_population_ifr(), axes, compact=True)
 
     assert rendered["heatmap"] is not None
-    assert axes[1].get_ylabel() == "Hz"
+    assert axes[1].get_ylabel() == "Mean IFR (Hz)"
     assert axes[0].get_title() == ""
     plt.close(fig)
 
@@ -710,15 +714,34 @@ def test_export_figure_writes_multiple_formats(tmp_path):
     plt.close(fig)
 
 
-def test_ifr_analyzer_plot_methods_delegate_to_plotting():
+def test_ifr_functional_plot_path_builds_histogram_and_timeseries():
     ds = fixture_dataset()
     prep = PrepConfig(mode="top", top_start=0, top_stop=2, verbose=False)
     cfg = IFRConfig(log_scale=False, overlay_gmm=False, time_grid_hz=10.0, max_time_points=20, ts_bins=5)
-    analyzer = IFRAnalyzer.from_dataset(ds, config=cfg, selection_prep_config=prep)
+    refs = ds.select_ref_electrodes(prep)
+    spikes_list = [rec.spikes for rec in ds.recordings]
+    start_times = [rec.start_time for rec in ds.recordings]
+    end_times = [rec.end_time for rec in ds.recordings]
+    peaks = ifr_peaks(
+        spikes_list,
+        start_times,
+        end_times,
+        log_scale=cfg.log_scale,
+        selected_refs_per_recording=refs,
+    )
+    fit = fit_ifr_gmm(peaks.values, log_scale=cfg.log_scale, n_components=cfg.n_components) if cfg.overlay_gmm else None
+    panels = prepare_ifr_timeseries_panels(
+        spikes_list,
+        start_times,
+        end_times,
+        refs,
+        log_scale=cfg.log_scale,
+        time_grid_hz=cfg.time_grid_hz,
+        max_time_points=cfg.max_time_points,
+    )
 
-    hist_fig, hist_ax = analyzer.plot_histogram(hist_bins=5)
-    ts_results = analyzer.plot_timeseries(recording_titles=["rec0"])
-    panels = analyzer.timeseries_panels()
+    hist_fig, hist_ax = plot_ifr_histogram(peaks, cfg, fit=fit, hist_bins=5)
+    ts_results = plot_ifr_timeseries_panels(panels, cfg, recording_titles=["rec0"])
 
     assert hist_ax.get_ylabel() == "Density"
     assert len(ts_results) == 1

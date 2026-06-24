@@ -19,7 +19,6 @@ from .artifacts import (
     save_wave_checkpoints,
     write_manifest,
 )
-from .analyzers.ifr import IFRAnalyzer, IFRConfig
 from .metrics.burst import (
     align_highres_to_anchors,
     build_highres_traces,
@@ -30,9 +29,10 @@ from .metrics.burst import (
     detect_network_burst_epochs,
     summarize_aligned_electrode_rates,
 )
+from .metrics.ifr import IFRConfig, prepare_ifr_timeseries_panels
 from .metrics.transfer_entropy import build_trigger_summary, run_discrete_te
 from .metrics.waves import analyze_eventwise_waves
-from .prep import PrepConfig, RestingActivityDataset
+from .preprocessing.dataset import PrepConfig, RestingActivityDataset
 
 
 @dataclass(frozen=True)
@@ -235,10 +235,22 @@ def run_workflow(config: dict[str, Any]) -> dict[str, Any]:
     ifr_cfg = config.get("analyses", {}).get("ifr", {})
     if ifr_cfg.get("enabled", False):
         kwargs = {key: value for key, value in ifr_cfg.items() if key in IFRConfig.__dataclass_fields__}
-        analyzer = IFRAnalyzer.from_dataset(dataset, config=IFRConfig(**kwargs), selection_prep_config=prep_config)
-        result["ifr_analyzer"] = analyzer
+        ifr_config = IFRConfig(**kwargs)
+        result["ifr_config"] = ifr_config
         if ifr_cfg.get("write_timeseries_checkpoints", False):
-            ifr_checkpoints = save_ifr_timeseries_checkpoints(analyzer.timeseries_panels(), paths)
+            spikes_list = [rec.spikes for rec in dataset.recordings]
+            start_times = [rec.start_time for rec in dataset.recordings]
+            end_times = [rec.end_time for rec in dataset.recordings]
+            panels = prepare_ifr_timeseries_panels(
+                spikes_list,
+                start_times,
+                end_times,
+                refs,
+                log_scale=ifr_config.log_scale,
+                time_grid_hz=ifr_config.time_grid_hz,
+                max_time_points=ifr_config.max_time_points,
+            )
+            ifr_checkpoints = save_ifr_timeseries_checkpoints(panels, paths)
             checkpoints.update({f"ifr_timeseries_{key}": str(value) for key, value in ifr_checkpoints.items()})
             result["ifr_timeseries_checkpoints"] = ifr_checkpoints
 

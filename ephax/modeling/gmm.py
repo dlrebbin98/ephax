@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from scipy.stats import chi2
 from sklearn.mixture import GaussianMixture
 
-from ..models import GMMFit
+
+@dataclass
+class GMMFit:
+    means_hz: np.ndarray
+    std: np.ndarray
+    weights: np.ndarray
+    p_value: float | None = None
 
 
 def fit_ifr_gmm(

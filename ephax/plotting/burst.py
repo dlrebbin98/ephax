@@ -10,7 +10,7 @@ import pandas as pd
 from matplotlib.colors import LogNorm, Normalize
 from matplotlib.ticker import LogFormatterMathtext, LogLocator
 
-from ..models import AlignedBurstEvents, NetworkActivityState, PopulationIFR
+from ..metrics.burst import AlignedBurstEvents, NetworkActivityState, PopulationIFR
 from .style import COLORMAPS, FONT_SIZES, LINE_WIDTHS, PAPER_COLORS, UNIT_LABELS, figure_mode_defaults, resolve_figure_size
 
 

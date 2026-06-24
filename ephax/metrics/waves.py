@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter1d
 
-from ..models import AlignedBurstEvents, WaveAnalysisResult
 from .burst import (
+    AlignedBurstEvents,
     align_highres_to_anchors,
     assign_max_population_ifr_burst_anchors,
     build_highres_traces,
@@ -16,6 +17,17 @@ from .burst import (
     detect_high_activity_epochs,
     detect_participation_burst_epochs,
 )
+
+
+@dataclass
+class WaveAnalysisResult:
+    event_direction: object
+    trace: object
+    peaks: object
+    bin_summary: object
+    fit_summary: object
+    heatmap: object
+    bootstrap_speeds: np.ndarray
 
 
 def wave_cache_key(

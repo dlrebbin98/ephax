@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
 
-from ..models import AlignedBurstEvents, DiscreteTEResult, HighResTraces
+from .burst import AlignedBurstEvents, HighResTraces
+
+
+@dataclass
+class DiscreteTEResult:
+    delay_centers_ms: np.ndarray
+    signed_dx_centers_um: np.ndarray
+    conditional_probability: np.ndarray
+    raw_te_bits: np.ndarray
+    bias_corrected_te_bits: np.ndarray
+    te_pvalue: np.ndarray
+    effective_observations: np.ndarray
+    trigger_summary: object
+    observation_summary: object
+    ridge_summary: object
+    fit_summary: object
+    score: float
 
 
 def blocks_to_bins(blocks_ms, *, bin_ms: float) -> list[tuple[int, int]]:

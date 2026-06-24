@@ -8,9 +8,8 @@ from matplotlib.colors import to_rgba
 from scipy.ndimage import gaussian_filter1d
 
 from ephax import PrepConfig, Recording, RestingActivityDataset, workflows
-from ephax.models import WaveAnalysisResult
-from ephax.models import AlignedBurstEvents
 from ephax.metrics.burst import (
+    AlignedBurstEvents,
     activity_state_kde_peak_frequencies,
     align_highres_to_anchors,
     assign_max_population_ifr_burst_anchors,
@@ -31,6 +30,7 @@ from ephax.metrics.burst import (
     refine_participation_burst_anchors,
     summarize_aligned_electrode_rates,
 )
+from ephax.metrics.waves import WaveAnalysisResult
 from ephax.metrics.waves import (
     add_wave_direction_balance_columns,
     aggregate_wave_results,

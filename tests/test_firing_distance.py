@@ -4,9 +4,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from ephax import FiringDistanceAnalyzer, PrepConfig, Recording, RestingActivityDataset
-from ephax.metrics.firing_distance import avg_rate_vs_distance, cofiring_avg_vs_distance
-from ephax.models import CofiringDistanceResult, FRDistanceResult
+from ephax import Recording, RestingActivityDataset
+from ephax.metrics.firing_distance import (
+    CofiringDistanceResult,
+    FRDistanceResult,
+    avg_rate_vs_distance,
+    cofiring_avg_vs_distance,
+    correlation_curve_from_frequencies,
+    frequency_peak_weights,
+)
 from ephax.plotting.firing_distance import plot_binned_distance_series
 
 
@@ -42,51 +48,24 @@ def test_firing_distance_metrics_are_pure_compute_entry_points():
     assert cofiring.proportions.tolist() == [0.5, 0.0]
 
 
-def test_firing_distance_analyzer_delegates_compute_to_metrics():
-    ds = fixture_dataset()
-    analyzer = FiringDistanceAnalyzer(
-        ds,
-        refs_per_recording=[np.array([101])],
-        selection_prep_config=PrepConfig(mode="top", top_start=0, top_stop=2, verbose=False),
+def test_frequency_peak_weights_select_explicit_values():
+    ok, gamma_hz, weights = frequency_peak_weights(
+        np.array([12.0, 40.0, 120.0]),
+        peak_min_hz=30.0,
+        peak_max_hz=100.0,
     )
-
-    rate = analyzer.avg_rate_vs_distance(min_distance=0, max_distance=10)
-    cofiring = analyzer.cofiring_avg_vs_distance(plusminus_ms=150.0, min_distance=0, max_distance=10)
-
-    assert rate.distances.tolist() == [5.0, 5.0]
-    assert cofiring.distances.tolist() == [5.0, 5.0]
-    assert cofiring.proportions.tolist() == [0.5, 0.0]
-
-
-def test_firing_distance_analyzer_uses_fixed_frequency_values():
-    ds = fixture_dataset()
-    analyzer = FiringDistanceAnalyzer(
-        ds,
-        refs_per_recording=[np.array([101])],
-        frequency_values_hz=np.array([12.0, 40.0, 120.0]),
-    )
-
-    ok, gamma_hz, weights = analyzer._compute_ifr_peaks_weights(peak_min_hz=30.0, peak_max_hz=100.0)
 
     assert ok
     assert gamma_hz.tolist() == [40.0]
     assert weights.tolist() == [1.0]
 
 
-def test_fixed_frequency_values_skip_ifr_gmm(monkeypatch):
-    ds = fixture_dataset()
-
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("GMM fitting should not run when fixed frequencies are supplied")
-
-    monkeypatch.setattr("ephax.analyzers.ifr.IFRAnalyzer.fit_gmm", fail_if_called)
-    analyzer = FiringDistanceAnalyzer(
-        ds,
-        refs_per_recording=[np.array([101])],
-        frequency_values_hz=np.array([40.0]),
+def test_correlation_curve_from_frequencies_uses_explicit_values():
+    curve = correlation_curve_from_frequencies(
+        np.array([40.0]),
+        peak_min_hz=30.0,
+        peak_max_hz=100.0,
     )
-
-    curve = analyzer.correlation_curve(peak_min_hz=30.0, peak_max_hz=100.0)
 
     assert curve is not None
     r_um, values = curve

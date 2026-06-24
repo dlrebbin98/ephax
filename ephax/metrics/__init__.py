@@ -1,7 +1,8 @@
 """Pure metric computations."""
 
-from .binning import bin_series
+from .binning import BinnedSeries, bin_series
 from .burst import (
+    AlignedBurstEvents,
     align_highres_to_anchors,
     activity_state_kde_peak_frequencies,
     assign_max_population_ifr_burst_anchors,
@@ -22,25 +23,39 @@ from .burst import (
     detect_network_burst_epochs,
     detect_participation_burst_epochs,
     extract_activity_state_ifr,
+    HighResTraces,
     interval_membership,
+    NetworkActivityState,
     order_aligned_rate_by_summary,
     order_aligned_rate_by_x,
+    PopulationIFR,
     refine_participation_burst_anchors,
     summarize_aligned_electrode_rates,
 )
-from .cofiring import aggregate_cofiring_heatmap, cofiring_proportions, cofiring_vs_distance_by_delay
-from .firing_distance import avg_rate_vs_distance, cofiring_avg_vs_distance
+from .cofiring import CofiringHeatmap, aggregate_cofiring_heatmap, cofiring_proportions, cofiring_vs_distance_by_delay
+from .firing_distance import (
+    CofiringDistanceResult,
+    FRDistanceResult,
+    avg_rate_vs_distance,
+    cofiring_avg_vs_distance,
+    correlation_curve_from_frequencies,
+    frequency_peak_weights,
+)
 from .ifr import (
     activity_wave_supplementary_tables,
     bootstrap_mean_ci,
     build_activity_state_kde_for_div,
     calculate_ifr,
+    IFRConfig,
+    IFRPeaks,
+    IFRTimeSeriesPanel,
     ifr_peaks,
     paired_neighbor_pvalues,
     prepare_ifr_timeseries_panel,
     prepare_ifr_timeseries_panels,
     p_to_stars,
 )
+from .layout_grid import GridResult, compute_grid_avghz_per_recording, compute_grid_avghz_pooled, format_recording_title
 from .sttc import (
     compute_sttc_adjacency,
     concatenate_spike_times_over_intervals,
@@ -67,6 +82,7 @@ from .synchrony_distance import (
     write_synchrony_distance_cache,
 )
 from .transfer_entropy import (
+    DiscreteTEResult,
     blocks_to_bins,
     build_observation_summary,
     build_signed_target_map,
@@ -92,6 +108,7 @@ from .waves import (
     save_wave_result_cache,
     summarize_wave_recording_result,
     summarize_wave_peaks,
+    WaveAnalysisResult,
     wave_cache_dir,
     wave_fit_diagnostics,
     wave_cache_key,
@@ -100,6 +117,7 @@ from .waves import (
 
 __all__ = [
     "aggregate_cofiring_heatmap",
+    "AlignedBurstEvents",
     "align_highres_to_anchors",
     "activity_state_kde_peak_frequencies",
     "activity_wave_supplementary_tables",
@@ -108,6 +126,7 @@ __all__ = [
     "avg_rate_vs_distance",
     "assign_max_population_ifr_burst_anchors",
     "bin_series",
+    "BinnedSeries",
     "binned_kde_peak_summary",
     "blocks_to_bins",
     "bootstrap_mean_ci",
@@ -127,6 +146,10 @@ __all__ = [
     "build_signed_target_map",
     "build_trigger_summary",
     "calculate_ifr",
+    "CofiringDistanceResult",
+    "CofiringHeatmap",
+    "compute_grid_avghz_per_recording",
+    "compute_grid_avghz_pooled",
     "ActivityIntervalConfig",
     "choose_activity_intervals",
     "compute_electrode_peak_time_map",
@@ -135,6 +158,7 @@ __all__ = [
     "cofiring_avg_vs_distance",
     "cofiring_proportions",
     "cofiring_vs_distance_by_delay",
+    "correlation_curve_from_frequencies",
     "analyze_eventwise_waves",
     "compute_or_load_wave_result",
     "counts_from_te_states",
@@ -150,6 +174,14 @@ __all__ = [
     "extract_first_stable_ridge",
     "fit_speed_with_bootstrap",
     "fit_wave_speed",
+    "FRDistanceResult",
+    "format_recording_title",
+    "frequency_peak_weights",
+    "HighResTraces",
+    "GridResult",
+    "IFRConfig",
+    "IFRPeaks",
+    "IFRTimeSeriesPanel",
     "ifr_peaks",
     "interval_membership",
     "load_wave_result_cache",
@@ -181,10 +213,14 @@ __all__ = [
     "SynchronyDistanceConfig",
     "thresholded_edge_table",
     "transfer_entropy_bits_from_counts",
+    "DiscreteTEResult",
     "wave_cache_dir",
+    "WaveAnalysisResult",
     "wave_fit_diagnostics",
     "wave_cache_key",
     "wave_settings_from_config",
     "write_sttc_network_cache",
     "write_synchrony_distance_cache",
+    "NetworkActivityState",
+    "PopulationIFR",
 ]

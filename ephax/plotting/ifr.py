@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import norm
 
-from ..metrics.ifr import prepare_ifr_timeseries_panels
-from ..models import GMMFit, IFRPeaks, IFRTimeSeriesPanel
+from ..metrics.ifr import IFRPeaks, IFRTimeSeriesPanel, prepare_ifr_timeseries_panels
+from ..modeling.gmm import GMMFit
 from .style import COLORMAPS, LINE_WIDTHS, UNIT_LABELS, figure_mode_defaults, resolve_figure_size
 
 

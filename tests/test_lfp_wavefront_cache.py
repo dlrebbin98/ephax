@@ -1,7 +1,7 @@
 import h5py
 import pytest
 
-from ephax.lfp_wavefront_cache import (
+from ephax.artifacts.wavefront import (
     WavefrontCacheConfig,
     require_wavefront_caches,
     wavefront_cache_status,

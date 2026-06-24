@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, Tuple
 
 import numpy as np
@@ -7,8 +8,14 @@ import pandas as pd
 from joblib import Parallel, delayed
 from scipy.stats import binned_statistic
 
-from ..models import CofiringHeatmap
 from ..preprocessing.geometry import assign_r_distance
+
+
+@dataclass
+class CofiringHeatmap:
+    Z: np.ndarray
+    distance_bins: np.ndarray
+    delays: np.ndarray
 
 
 def cofiring_proportions(

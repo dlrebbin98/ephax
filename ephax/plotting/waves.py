@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..models import WaveAnalysisResult
+from ..metrics.waves import WaveAnalysisResult
 from .style import COLORMAPS, LINE_WIDTHS
 
 

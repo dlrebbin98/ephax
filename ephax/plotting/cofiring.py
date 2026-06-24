@@ -3,7 +3,7 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import numpy as np
 
-from ..models import CofiringHeatmap
+from ..metrics.cofiring import CofiringHeatmap
 from .style import UNIT_LABELS, figure_mode_defaults, resolve_figure_size
 
 

@@ -2,10 +2,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ephax import IFRAnalyzer, IFRConfig, PrepConfig, Recording, RestingActivityDataset
-from ephax.compute import cofiring_proportions
+from ephax import PrepConfig, Recording, RestingActivityDataset
 from ephax.data_io import validate_layout, validate_spikes_data
-from ephax.helper_functions import assign_r_distance, calculate_ifr
+from ephax.metrics.cofiring import cofiring_proportions
+from ephax.metrics.ifr import calculate_ifr, prepare_ifr_timeseries_panels
+from ephax.preprocessing.geometry import assign_r_distance
 
 
 def fixture_spikes():
@@ -31,12 +32,25 @@ def fixture_dataset():
     return RestingActivityDataset([rec], sf=1000.0)
 
 
-def test_public_import_and_ifr_analyzer_smoke():
+def test_public_import_and_ifr_panel_prep_smoke():
     ds = fixture_dataset()
     cfg = PrepConfig(mode="top", top_start=0, top_stop=2, verbose=False)
-    analyzer = IFRAnalyzer.from_dataset(ds, config=IFRConfig(log_scale=False, overlay_gmm=False), selection_prep_config=cfg)
-    assert len(analyzer.spikes_list) == 1
-    assert [list(refs) for refs in analyzer._refs_per_recording] == [[102, 101]]
+    refs = ds.select_ref_electrodes(cfg)
+    spikes_list = [rec.spikes for rec in ds.recordings]
+    start_times = [rec.start_time for rec in ds.recordings]
+    end_times = [rec.end_time for rec in ds.recordings]
+    panels = prepare_ifr_timeseries_panels(
+        spikes_list,
+        start_times,
+        end_times,
+        refs,
+        log_scale=False,
+        time_grid_hz=10.0,
+        max_time_points=20,
+    )
+    assert [list(ref) for ref in refs] == [[102, 101]]
+    assert len(panels) == 1
+    assert panels[0].electrodes.tolist() == [102, 101]
 
 
 def test_validate_spikes_and_layout_reject_bad_shapes():

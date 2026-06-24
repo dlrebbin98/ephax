@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from scipy.stats import binned_statistic
 
-from ..models import BinnedSeries
+
+@dataclass
+class BinnedSeries:
+    centers: np.ndarray
+    mean: np.ndarray
+    stderr: np.ndarray
 
 
 def bin_series(x: np.ndarray, y: np.ndarray, bins: np.ndarray) -> BinnedSeries:

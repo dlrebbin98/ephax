@@ -17,9 +17,9 @@ from ephax.artifacts import (
     save_ifr_timeseries_checkpoints,
     write_manifest,
 )
-from ephax.analyzers.ifr import IFRAnalyzer, IFRConfig
 from ephax.cli.build_atomic_figures import build_ifr_timeseries_figures
-from ephax.prep import Recording, RestingActivityDataset
+from ephax.metrics.ifr import IFRConfig, prepare_ifr_timeseries_panels
+from ephax.preprocessing.dataset import Recording, RestingActivityDataset
 from ephax import workflows
 
 
@@ -129,12 +129,19 @@ def test_ifr_timeseries_checkpoints_round_trip_and_atomic_figure(tmp_path):
     paths = ensure_run_dirs(RunPaths.from_config({"run": {"id": "abc", "output_dir": str(tmp_path)}}))
     ds = fixture_dataset()
     refs = ds.select_ref_electrodes(workflows.build_prep_config({"selection": {"mode": "top", "top_start": 0, "top_stop": 2}}))
-    analyzer = IFRAnalyzer.from_dataset(
-        ds,
-        config=IFRConfig(log_scale=False, overlay_gmm=False, time_grid_hz=10.0, max_time_points=20, ts_bins=5),
+    cfg = IFRConfig(log_scale=False, overlay_gmm=False, time_grid_hz=10.0, max_time_points=20, ts_bins=5)
+    spikes_list = [rec.spikes for rec in ds.recordings]
+    start_times = [rec.start_time for rec in ds.recordings]
+    end_times = [rec.end_time for rec in ds.recordings]
+    panels = prepare_ifr_timeseries_panels(
+        spikes_list,
+        start_times,
+        end_times,
+        refs,
+        log_scale=cfg.log_scale,
+        time_grid_hz=cfg.time_grid_hz,
+        max_time_points=cfg.max_time_points,
     )
-    analyzer._refs_per_recording = refs
-    panels = analyzer.timeseries_panels()
 
     saved = save_ifr_timeseries_checkpoints(panels, paths)
     assert saved["heatmap"].exists()

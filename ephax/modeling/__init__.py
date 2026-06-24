@@ -18,7 +18,7 @@ from .differentiation import (
     run_apoptosis_simulation,
     snapshot_active_nodes,
 )
-from .gmm import fit_ifr_gmm
+from .gmm import GMMFit, fit_ifr_gmm
 from .likelihood import likelihood_ratio_test, log_likelihood
 
 __all__ = [
@@ -33,6 +33,7 @@ __all__ = [
     "ephaptic_axonal_kernel",
     "ephaptic_correlation_kernel",
     "fit_ifr_gmm",
+    "GMMFit",
     "interaction_scores",
     "likelihood_ratio_test",
     "log_likelihood",

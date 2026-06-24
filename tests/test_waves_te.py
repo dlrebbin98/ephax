@@ -11,8 +11,8 @@ from ephax.metrics.transfer_entropy import (
     run_discrete_te,
     transfer_entropy_bits_from_counts,
 )
+from ephax.metrics.burst import AlignedBurstEvents, HighResTraces
 from ephax.metrics.waves import analyze_eventwise_waves
-from ephax.models import AlignedBurstEvents, HighResTraces
 
 
 def aligned_wave_fixture():

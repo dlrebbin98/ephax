@@ -8,8 +8,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from ..analyzers.ifr import IFRConfig
 from ..artifacts import load_ifr_timeseries_panels, save_figure
+from ..metrics.ifr import IFRConfig
 from ..plotting.ifr import plot_ifr_timeseries_panel
 
 
@@ -59,4 +59,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

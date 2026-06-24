@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable, Optional
 
 import numpy as np
@@ -8,7 +9,41 @@ from scipy.signal import find_peaks
 from scipy import stats
 from scipy.stats import gaussian_kde
 
-from ..models import IFRPeaks, IFRTimeSeriesPanel
+@dataclass
+class IFRConfig:
+    """Configuration for IFR plotting and peak-analysis helpers."""
+
+    log_scale: bool = True
+    n_components: Optional[int] = None
+    random_state: int = 0
+    overlay_gmm: bool = True
+    show_kde: bool = False
+    show_peaks: bool = False
+    ts_bins: int = 50
+    time_grid_hz: float = 100.0
+    max_time_points: int = 5000
+
+
+@dataclass
+class IFRPeaks:
+    values: np.ndarray
+    kde_x: np.ndarray
+    kde_y: np.ndarray
+    peaks_x: np.ndarray
+    peaks_y: np.ndarray
+    peaks_hz: np.ndarray
+
+
+@dataclass
+class IFRTimeSeriesPanel:
+    recording_index: int
+    start_time: float
+    end_time: float
+    electrodes: np.ndarray
+    time_points: np.ndarray
+    heatmap: np.ndarray
+    histogram_values: np.ndarray
+    log_scale: bool
 
 
 def calculate_ifr(spikes_data, selected_electrodes, start_time=None, end_time=None):

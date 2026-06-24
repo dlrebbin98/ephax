@@ -1,10 +1,28 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
 
-from ..models import BinnedSeries, CofiringDistanceResult, FRDistanceResult
+from ..modeling.ephaptic import correlation_function
+from .binning import BinnedSeries
+
+
+@dataclass
+class FRDistanceResult:
+    distances: np.ndarray
+    rates: np.ndarray
+    bins: np.ndarray
+    binned: BinnedSeries
+
+
+@dataclass
+class CofiringDistanceResult:
+    distances: np.ndarray
+    proportions: np.ndarray
+    bins: np.ndarray
+    binned: BinnedSeries
 
 
 def avg_rate_vs_distance(
@@ -115,6 +133,50 @@ def cofiring_avg_vs_distance(
     return _cofiring_result(distances, props, log=log, min_distance=min_distance, max_distance=max_distance)
 
 
+def frequency_peak_weights(
+    frequency_values_hz,
+    *,
+    peak_min_hz: float = 30.0,
+    peak_max_hz: float = 1000.0,
+) -> tuple[bool, np.ndarray, np.ndarray]:
+    """Select model frequencies and unit weights from explicit frequency values."""
+    values = _validate_frequency_values(frequency_values_hz)
+    mask = (values > float(peak_min_hz)) & (values < float(peak_max_hz))
+    selected = values[mask]
+    if selected.size == 0:
+        return False, np.array([], dtype=float), np.array([], dtype=float)
+    return True, selected, np.ones_like(selected, dtype=float)
+
+
+def correlation_curve_from_frequencies(
+    frequency_values_hz,
+    *,
+    v_eph: float = 0.1,
+    v_ax: float = 0.45,
+    lambda_eph: float = 100000.0,
+    peak_min_hz: float = 30.0,
+    peak_max_hz: float = 1000.0,
+    min_distance: float = 50.0,
+    max_distance: float = 3500.0,
+    num_points: int = 1000,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Compute the summed ephaptic-axonal correlation curve for explicit frequencies."""
+    ok, gamma_hz, weights = frequency_peak_weights(
+        frequency_values_hz,
+        peak_min_hz=peak_min_hz,
+        peak_max_hz=peak_max_hz,
+    )
+    if not ok:
+        return None
+    r_um = np.linspace(float(min_distance), float(max_distance), int(num_points))
+    v_eph_um_s = float(v_eph) * 1e6
+    v_ax_um_s = float(v_ax) * 1e6
+    total = np.zeros_like(r_um)
+    for hz, weight in zip(gamma_hz, weights):
+        total += correlation_function(r_um, hz, v_eph_um_s, v_ax_um_s, float(lambda_eph)) * weight
+    return r_um, total
+
+
 def _fr_result(
     distances: list[float] | np.ndarray,
     rates: list[float] | np.ndarray,
@@ -149,6 +211,15 @@ def _cofiring_result(
     props_arr = np.asarray(proportions, dtype=float)
     bins, binned = _bin_distance_series(distances_arr, props_arr, log=log, min_distance=min_distance, max_distance=max_distance)
     return CofiringDistanceResult(distances=distances_arr, proportions=props_arr, bins=bins, binned=binned)
+
+
+def _validate_frequency_values(frequency_values_hz) -> np.ndarray:
+    values = np.asarray(frequency_values_hz, dtype=float).reshape(-1)
+    values = values[np.isfinite(values)]
+    values = values[values > 0]
+    if values.size == 0:
+        raise ValueError("frequency_values_hz must contain at least one positive finite frequency.")
+    return np.sort(values)
 
 
 def _bin_distance_series(

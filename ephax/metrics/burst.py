@@ -10,8 +10,54 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks, peak_prominences
 from scipy.stats import gaussian_kde
 
-from ..models import AlignedBurstEvents, HighResTraces, NetworkActivityState, PopulationIFR
 from .ifr import calculate_ifr
+
+
+@dataclass
+class PopulationIFR:
+    time_grid: np.ndarray
+    electrodes: np.ndarray
+    ifr_matrix: np.ndarray
+    mean_ifr: np.ndarray
+    mean_ifr_smooth: np.ndarray
+    per_electrode_mean_hz: np.ndarray
+
+
+@dataclass
+class HighResTraces:
+    bin_edges_s: np.ndarray
+    time_centers_s: np.ndarray
+    electrodes: np.ndarray
+    per_electrode_rate_hz: np.ndarray
+    population_rate_hz: np.ndarray
+    spikes_by_electrode: dict[int, np.ndarray]
+    spike_presence: np.ndarray
+
+
+@dataclass
+class NetworkActivityState:
+    bin_edges_s: np.ndarray
+    time_centers_s: np.ndarray
+    electrodes: np.ndarray
+    per_electrode_rate_hz: np.ndarray
+    active_mask: np.ndarray
+    spike_counts: np.ndarray
+    active_electrode_counts: np.ndarray
+    total_spike_counts: np.ndarray
+    participation_fraction: np.ndarray
+    population_activity_hz: np.ndarray
+    network_score: np.ndarray
+    electrode_thresholds_hz: np.ndarray
+
+
+@dataclass
+class AlignedBurstEvents:
+    relative_time_ms: np.ndarray
+    population_windows: np.ndarray
+    aligned_rate: np.ndarray
+    aligned_spikes: np.ndarray
+    valid_anchors: object
+    electrodes: np.ndarray
 
 
 @dataclass(frozen=True)
