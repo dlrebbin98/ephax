@@ -31,6 +31,7 @@ from .ifr import (
 )
 from .layout import FigureSpec, PanelSpec, layout_preset, make_figure_grid
 from .layout_grid import draw_grid_avghz, draw_grid_avghz_panel, grid_avghz_panel_axes_factory
+from .lfp import save_lfp_phase_gif
 from .panels import add_panel_bundle_label, add_panel_label, add_panel_suptitle, add_scale_bar
 from .style import (
     NATURE_STYLE,
@@ -108,6 +109,7 @@ __all__ = [
     "population_ifr_summary_axes_factory",
     "save_average_hex_gif",
     "save_event_hex_gif",
+    "save_lfp_phase_gif",
     "select_high_activity_windows",
     "truncate_colormap",
 ]

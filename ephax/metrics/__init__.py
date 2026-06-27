@@ -56,6 +56,16 @@ from .ifr import (
     p_to_stars,
 )
 from .layout_grid import GridResult, compute_grid_avghz_per_recording, compute_grid_avghz_pooled, format_recording_title
+from .lfp import (
+    LFPEventFrontBuildConfig,
+    LFPWavefrontCacheConfig,
+    build_lfp_wavefront_caches,
+    ensure_lfp_wavefront_caches,
+    lfp_wavefront_cache_status,
+    load_completed_lfp_wavefront_cache,
+    read_lfp_wavefront_cache,
+    require_lfp_wavefront_caches,
+)
 from .sttc import (
     compute_sttc_adjacency,
     concatenate_spike_times_over_intervals,
@@ -184,6 +194,14 @@ __all__ = [
     "IFRTimeSeriesPanel",
     "ifr_peaks",
     "interval_membership",
+    "LFPEventFrontBuildConfig",
+    "LFPWavefrontCacheConfig",
+    "build_lfp_wavefront_caches",
+    "ensure_lfp_wavefront_caches",
+    "lfp_wavefront_cache_status",
+    "load_completed_lfp_wavefront_cache",
+    "read_lfp_wavefront_cache",
+    "require_lfp_wavefront_caches",
     "load_wave_result_cache",
     "load_cached_aggregate_wave",
     "load_cached_wave_for_div",
