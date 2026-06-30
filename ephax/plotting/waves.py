@@ -15,8 +15,16 @@ def draw_wave_timing_panel(
     show_legend: bool | None = None,
     compact: bool = True,
     cmap: str | None = None,
+    time_window_ms: tuple[float, float] | None = None,
 ):
-    """Draw origin-aligned x-bin wave timing and linear speed fit."""
+    """Draw origin-aligned x-bin wave timing and linear speed fit.
+
+    The displayed time range is **data-driven** by default: it is set to the envelope
+    of the per-bin peak-time 95% CIs (plus the fit line and the 0-ms reference), not to
+    the peak-search/fit window. This keeps the cosmetic display range decoupled from the
+    speed fit — the implied-speed estimate never depends on what is shown. Pass an
+    explicit ``time_window_ms`` to override.
+    """
     heatmap = result.heatmap
     fit = result.fit_summary.iloc[0]
     bin_summary = result.bin_summary
@@ -60,6 +68,21 @@ def draw_wave_timing_panel(
     y_line = float(fit["slope_ms_per_um"]) * x_line + float(fit["intercept_ms"])
     ax.plot(x_line, y_line, color="crimson", ls="--", lw=LINE_WIDTHS["emphasis"], label="Linear fit")
     ax.set_xlim(0.0, array_width_um)
+
+    # Time-axis range: dictated by the data (per-bin peak-time CIs + fit line + 0 ms),
+    # not the peak-search/fit window. Clipped to the available heatmap extent.
+    if time_window_ms is not None:
+        ax.set_ylim(float(time_window_ms[0]), float(time_window_ms[1]))
+    else:
+        env = 1.96 * bin_summary["sem_peak_time_ms"].to_numpy(dtype=float)
+        peak_t = bin_summary["mean_peak_time_ms"].to_numpy(dtype=float)
+        candidates = np.concatenate([peak_t - env, peak_t + env, y_line, [0.0]])
+        candidates = candidates[np.isfinite(candidates)]
+        if candidates.size:
+            ylo, yhi = float(candidates.min()), float(candidates.max())
+            pad = 0.10 * (yhi - ylo) if yhi > ylo else 1.0
+            ax.set_ylim(max(ylo - pad, float(time_ms.min())), min(yhi + pad, float(time_ms.max())))
+
     ax.set_xlabel("Distance from inferred origin side ($\\mu m$)")
     ax.set_ylabel("Peak time relative to event peak (ms)")
     counts = directions["event_direction"].value_counts().reindex(["left_to_right", "right_to_left"], fill_value=0)
