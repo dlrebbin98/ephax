@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import pickle
+import warnings
 from typing import Iterable
 
 import numpy as np
@@ -260,29 +261,50 @@ def build_pair_arrays(
     return electrodes, ref_idx[keep], target_idx[keep], pair_distance[keep], bin_idx[keep], centers
 
 
-def interval_spike_matrix(recording, electrodes: np.ndarray, start_s: float, end_s: float, bin_ms: float) -> np.ndarray:
+def spike_presence_matrix(
+    spike_times_s: np.ndarray,
+    spike_electrodes: np.ndarray,
+    elec_to_idx: dict[int, int],
+    start_s: float,
+    end_s: float,
+    bin_ms: float,
+) -> np.ndarray:
+    """1 ms presence matrix (time bins x electrodes) for one interval.
+
+    The general array-based primitive shared by the distance-binned and the
+    direction-resolved synchrony paths. ``elec_to_idx`` maps electrode id to
+    column; spikes on electrodes outside the mapping are dropped.
+    """
     bin_s = float(bin_ms) / 1000.0
     n_bins = int(np.ceil((float(end_s) - float(start_s)) / bin_s))
+    n_elec = len(elec_to_idx)
     if n_bins <= 0:
-        return np.zeros((0, len(electrodes)), dtype=np.uint8)
+        return np.zeros((0, n_elec), dtype=np.uint8)
 
-    times = np.asarray(recording.spikes["time"], dtype=float)
-    spike_electrodes = np.asarray(recording.spikes["electrode"], dtype=int)
+    times = np.asarray(spike_times_s, dtype=float)
+    spike_electrodes = np.asarray(spike_electrodes, dtype=int)
     mask = (times >= float(start_s)) & (times < float(end_s))
     times = times[mask]
     spike_electrodes = spike_electrodes[mask]
     if times.size == 0:
-        return np.zeros((n_bins, len(electrodes)), dtype=np.uint8)
+        return np.zeros((n_bins, n_elec), dtype=np.uint8)
 
-    electrode_to_idx = {int(e): i for i, e in enumerate(np.asarray(electrodes, dtype=int))}
-    cols = np.fromiter((electrode_to_idx.get(int(e), -1) for e in spike_electrodes), dtype=int, count=spike_electrodes.size)
+    cols = np.fromiter((elec_to_idx.get(int(e), -1) for e in spike_electrodes), dtype=int, count=spike_electrodes.size)
     valid = cols >= 0
     rows = np.floor((times[valid] - float(start_s)) / bin_s).astype(int)
     cols = cols[valid]
     valid_rows = (rows >= 0) & (rows < n_bins)
-    mat = np.zeros((n_bins, len(electrodes)), dtype=np.uint8)
+    mat = np.zeros((n_bins, n_elec), dtype=np.uint8)
     mat[rows[valid_rows], cols[valid_rows]] = 1
     return mat
+
+
+def interval_spike_matrix(recording, electrodes: np.ndarray, start_s: float, end_s: float, bin_ms: float) -> np.ndarray:
+    """Presence matrix for the selected ``electrodes`` over one interval of a recording."""
+    elec_to_idx = {int(e): i for i, e in enumerate(np.asarray(electrodes, dtype=int))}
+    return spike_presence_matrix(
+        recording.spikes["time"], recording.spikes["electrode"], elec_to_idx, start_s, end_s, bin_ms
+    )
 
 
 def window_spike_matrix(spike_matrix: np.ndarray, lag_start_ms: float, lag_stop_ms: float, bin_ms: float) -> np.ndarray:
@@ -454,6 +476,128 @@ def compute_interval_synchrony_summaries(
     return (pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()), electrodes
 
 
+def weighted_event_bootstrap(
+    values: np.ndarray,
+    weights: np.ndarray,
+    *,
+    n_boot: int = 1000,
+    seed: int = 0,
+    ci: tuple[float, float] = (2.5, 97.5),
+    return_boot: bool = False,
+) -> dict:
+    """Pool per-event cell values by a weighted mean and bootstrap over events.
+
+    ``values`` and ``weights`` are ``(n_events, n_cells)`` arrays: row ``e`` holds
+    the per-cell value of one event (a distance bin for the scalar path, an
+    orientation x distance cell for the directional path) and its weight (pair
+    count). The pooled estimate is the event-weighted mean per cell,
+    ``sum(values * weights) / sum(weights)``; the bootstrap resamples whole events
+    with replacement, so events (not pairs or wells) are the unit of replication.
+    This is the within-culture pooling shared by both synchrony paths.
+    """
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    if values.shape != weights.shape or values.ndim != 2:
+        raise ValueError("values and weights must be matching (n_events, n_cells) arrays")
+    n_events, n_cells = values.shape
+    w = np.where(np.isfinite(weights) & np.isfinite(values), weights, 0.0)
+    vw = np.where(w > 0, values, 0.0) * w
+
+    def _pool(rows):
+        num = vw[rows].sum(axis=0)
+        den = w[rows].sum(axis=0)
+        return np.divide(num, den, out=np.full(n_cells, np.nan), where=den > 0), den
+
+    point, point_weight = _pool(np.arange(n_events))
+    out = {
+        "point": point,
+        "point_weight": point_weight,
+        "n_events": int(n_events),
+        "ci_lo": np.full(n_cells, np.nan),
+        "ci_hi": np.full(n_cells, np.nan),
+        "se": np.full(n_cells, np.nan),
+    }
+    if n_events == 0:
+        if return_boot:
+            out["boot"] = np.zeros((0, n_cells))
+        return out
+
+    rng = np.random.default_rng(int(seed))
+    boot = np.empty((int(n_boot), n_cells), dtype=float)
+    for b in range(int(n_boot)):
+        boot[b], _ = _pool(rng.integers(0, n_events, size=n_events))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        out["ci_lo"] = np.nanpercentile(boot, ci[0], axis=0)
+        out["ci_hi"] = np.nanpercentile(boot, ci[1], axis=0)
+        out["se"] = np.nanstd(boot, axis=0, ddof=1) if n_boot > 1 else np.full(n_cells, np.nan)
+    if return_boot:
+        out["boot"] = boot
+    return out
+
+
+def pool_distance_synchrony_across_recordings(
+    interval_summary: pd.DataFrame,
+    *,
+    metric: str = "excess_sync",
+    weight_col: str = "n_pairs",
+    n_boot: int = 1000,
+    seed: int = 0,
+    ci: tuple[float, float] = (2.5, 97.5),
+    return_boot: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+    """Within-culture pooled distance-bin synchrony with an event-level bootstrap.
+
+    ``interval_summary`` is the per-interval distance-bin table from
+    :func:`compute_interval_synchrony_summaries`, concatenated across the wells of
+    one culture with a ``recording_id`` column added. Each ``(recording_id,
+    interval_idx)`` is one event; events are pooled across wells and resampled,
+    so the well's between-replicate noise is traded for event-level power. With
+    ``return_boot`` the per-bootstrap pooled curves are also returned (long form:
+    ``bootstrap_idx, distance_bin_center_um, <metric>``).
+    """
+    empty = pd.DataFrame()
+    if interval_summary.empty:
+        return (empty, empty) if return_boot else empty
+    df = interval_summary.copy()
+    if "recording_id" not in df.columns:
+        df["recording_id"] = "0"
+    df["event_key"] = df["recording_id"].astype(str) + "|" + df["interval_idx"].astype(int).astype(str)
+    events = np.asarray(sorted(df["event_key"].unique()))
+    event_to_row = {e: i for i, e in enumerate(events)}
+    bins = np.asarray(sorted(df["distance_bin_center_um"].unique()), dtype=float)
+    bin_to_col = {b: j for j, b in enumerate(bins)}
+
+    values = np.full((events.size, bins.size), np.nan)
+    weights = np.zeros((events.size, bins.size))
+    for row in df.itertuples(index=False):
+        i = event_to_row[getattr(row, "event_key")]
+        j = bin_to_col[float(getattr(row, "distance_bin_center_um"))]
+        values[i, j] = float(getattr(row, metric))
+        weights[i, j] = float(getattr(row, weight_col))
+
+    res = weighted_event_bootstrap(values, weights, n_boot=n_boot, seed=seed, ci=ci, return_boot=return_boot)
+    summary = pd.DataFrame(
+        {
+            "distance_bin_center_um": bins,
+            metric: res["point"],
+            f"{metric}_ci_lo": res["ci_lo"],
+            f"{metric}_ci_hi": res["ci_hi"],
+            f"{metric}_se": res["se"],
+            "n_pairs": res["point_weight"],
+            "n_events": int(res["n_events"]),
+        }
+    )
+    if not return_boot:
+        return summary
+    boot = res.get("boot", np.zeros((0, bins.size)))
+    boot_df = pd.DataFrame(boot, columns=bins)
+    boot_df.insert(0, "bootstrap_idx", np.arange(boot.shape[0], dtype=int))
+    boot_long = boot_df.melt(id_vars="bootstrap_idx", var_name="distance_bin_center_um", value_name=metric)
+    boot_long["distance_bin_center_um"] = boot_long["distance_bin_center_um"].astype(float)
+    return summary, boot_long
+
+
 def bootstrap_interval_synchrony_summaries(
     interval_summary: pd.DataFrame,
     config: SynchronyDistanceConfig = SynchronyDistanceConfig(),
@@ -510,35 +654,52 @@ def bootstrap_interval_synchrony_summaries(
     return pd.DataFrame(rows)
 
 
+def _tag_recording_rows(df: pd.DataFrame, item: RecordingSynchronyInput, config: SynchronyDistanceConfig) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df if df is not None else pd.DataFrame()
+    df = df.copy()
+    df["dataset"] = item.dataset
+    df["well"] = int(item.well)
+    df["div"] = int(item.div)
+    df["recording_id"] = str(item.recording_id)
+    df["activity_scope"] = config.activity_scope
+    return df
+
+
 def compute_recording_synchrony_distance(
     item: RecordingSynchronyInput,
     config: SynchronyDistanceConfig = SynchronyDistanceConfig(),
     rng: np.random.Generator | None = None,
-) -> pd.DataFrame:
-    """Return cache-compatible bootstrapped synchrony rows for one recording."""
+    *,
+    return_interval_summary: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+    """Return cache-compatible bootstrapped synchrony rows for one recording.
+
+    With ``return_interval_summary`` also return the tagged per-interval distance-bin
+    summaries (the input to the event-level within-culture pooling) from the same
+    single matrix/surrogate computation — no extra cost.
+    """
 
     if rng is None:
         rng = np.random.default_rng(config.random_seed)
+
+    def _out(result, interval_summary):
+        return (result, interval_summary) if return_interval_summary else result
+
     intervals = normalize_intervals(item.selected_intervals)
     if intervals.empty:
-        return pd.DataFrame()
+        return _out(pd.DataFrame(), pd.DataFrame())
 
     coords = electrode_coords_um(item.recording.layout)
     available = np.asarray([int(e) for e in np.asarray(item.electrodes, dtype=int) if int(e) in coords.index], dtype=int)
     if available.size < 2:
-        return pd.DataFrame()
+        return _out(pd.DataFrame(), pd.DataFrame())
 
     interval_summary, _ = compute_interval_synchrony_summaries(item.recording, available, intervals, config, rng)
     result = bootstrap_interval_synchrony_summaries(interval_summary, config, rng)
-    if result.empty:
-        return result
-
-    result["dataset"] = item.dataset
-    result["well"] = int(item.well)
-    result["div"] = int(item.div)
-    result["recording_id"] = str(item.recording_id)
-    result["activity_scope"] = config.activity_scope
-    return result
+    result = _tag_recording_rows(result, item, config)
+    interval_summary = _tag_recording_rows(interval_summary, item, config)
+    return _out(result, interval_summary)
 
 
 def compute_synchrony_distance_payload(
