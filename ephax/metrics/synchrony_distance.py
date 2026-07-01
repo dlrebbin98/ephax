@@ -544,17 +544,21 @@ def pool_distance_synchrony_across_recordings(
     n_boot: int = 1000,
     seed: int = 0,
     ci: tuple[float, float] = (2.5, 97.5),
-) -> pd.DataFrame:
+    return_boot: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """Within-culture pooled distance-bin synchrony with an event-level bootstrap.
 
     ``interval_summary`` is the per-interval distance-bin table from
     :func:`compute_interval_synchrony_summaries`, concatenated across the wells of
     one culture with a ``recording_id`` column added. Each ``(recording_id,
     interval_idx)`` is one event; events are pooled across wells and resampled,
-    so the well's between-replicate noise is traded for event-level power.
+    so the well's between-replicate noise is traded for event-level power. With
+    ``return_boot`` the per-bootstrap pooled curves are also returned (long form:
+    ``bootstrap_idx, distance_bin_center_um, <metric>``).
     """
+    empty = pd.DataFrame()
     if interval_summary.empty:
-        return pd.DataFrame()
+        return (empty, empty) if return_boot else empty
     df = interval_summary.copy()
     if "recording_id" not in df.columns:
         df["recording_id"] = "0"
@@ -572,8 +576,8 @@ def pool_distance_synchrony_across_recordings(
         values[i, j] = float(getattr(row, metric))
         weights[i, j] = float(getattr(row, weight_col))
 
-    res = weighted_event_bootstrap(values, weights, n_boot=n_boot, seed=seed, ci=ci)
-    return pd.DataFrame(
+    res = weighted_event_bootstrap(values, weights, n_boot=n_boot, seed=seed, ci=ci, return_boot=return_boot)
+    summary = pd.DataFrame(
         {
             "distance_bin_center_um": bins,
             metric: res["point"],
@@ -584,6 +588,14 @@ def pool_distance_synchrony_across_recordings(
             "n_events": int(res["n_events"]),
         }
     )
+    if not return_boot:
+        return summary
+    boot = res.get("boot", np.zeros((0, bins.size)))
+    boot_df = pd.DataFrame(boot, columns=bins)
+    boot_df.insert(0, "bootstrap_idx", np.arange(boot.shape[0], dtype=int))
+    boot_long = boot_df.melt(id_vars="bootstrap_idx", var_name="distance_bin_center_um", value_name=metric)
+    boot_long["distance_bin_center_um"] = boot_long["distance_bin_center_um"].astype(float)
+    return summary, boot_long
 
 
 def bootstrap_interval_synchrony_summaries(
@@ -642,35 +654,52 @@ def bootstrap_interval_synchrony_summaries(
     return pd.DataFrame(rows)
 
 
+def _tag_recording_rows(df: pd.DataFrame, item: RecordingSynchronyInput, config: SynchronyDistanceConfig) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df if df is not None else pd.DataFrame()
+    df = df.copy()
+    df["dataset"] = item.dataset
+    df["well"] = int(item.well)
+    df["div"] = int(item.div)
+    df["recording_id"] = str(item.recording_id)
+    df["activity_scope"] = config.activity_scope
+    return df
+
+
 def compute_recording_synchrony_distance(
     item: RecordingSynchronyInput,
     config: SynchronyDistanceConfig = SynchronyDistanceConfig(),
     rng: np.random.Generator | None = None,
-) -> pd.DataFrame:
-    """Return cache-compatible bootstrapped synchrony rows for one recording."""
+    *,
+    return_interval_summary: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+    """Return cache-compatible bootstrapped synchrony rows for one recording.
+
+    With ``return_interval_summary`` also return the tagged per-interval distance-bin
+    summaries (the input to the event-level within-culture pooling) from the same
+    single matrix/surrogate computation — no extra cost.
+    """
 
     if rng is None:
         rng = np.random.default_rng(config.random_seed)
+
+    def _out(result, interval_summary):
+        return (result, interval_summary) if return_interval_summary else result
+
     intervals = normalize_intervals(item.selected_intervals)
     if intervals.empty:
-        return pd.DataFrame()
+        return _out(pd.DataFrame(), pd.DataFrame())
 
     coords = electrode_coords_um(item.recording.layout)
     available = np.asarray([int(e) for e in np.asarray(item.electrodes, dtype=int) if int(e) in coords.index], dtype=int)
     if available.size < 2:
-        return pd.DataFrame()
+        return _out(pd.DataFrame(), pd.DataFrame())
 
     interval_summary, _ = compute_interval_synchrony_summaries(item.recording, available, intervals, config, rng)
     result = bootstrap_interval_synchrony_summaries(interval_summary, config, rng)
-    if result.empty:
-        return result
-
-    result["dataset"] = item.dataset
-    result["well"] = int(item.well)
-    result["div"] = int(item.div)
-    result["recording_id"] = str(item.recording_id)
-    result["activity_scope"] = config.activity_scope
-    return result
+    result = _tag_recording_rows(result, item, config)
+    interval_summary = _tag_recording_rows(interval_summary, item, config)
+    return _out(result, interval_summary)
 
 
 def compute_synchrony_distance_payload(
