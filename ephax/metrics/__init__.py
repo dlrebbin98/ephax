@@ -56,13 +56,21 @@ from .ifr import (
     p_to_stars,
 )
 from .layout_grid import GridResult, compute_grid_avghz_per_recording, compute_grid_avghz_pooled, format_recording_title
-from .lfp import (
+from .event_selection import (
+    FrontNullConfig,
     LFPEventFrontBuildConfig,
     LFPWavefrontCacheConfig,
+    WellBurstConfig,
     build_lfp_wavefront_caches,
+    compute_front_null_support,
+    detect_well_bursts,
     ensure_lfp_wavefront_caches,
+    event_null_arrival_fit,
+    front_significant_events,
+    load_all_wavefront_caches,
     lfp_wavefront_cache_status,
     load_completed_lfp_wavefront_cache,
+    peri_anchor_spike_counts,
     read_lfp_wavefront_cache,
     require_lfp_wavefront_caches,
 )
@@ -238,6 +246,14 @@ __all__ = [
     "interval_membership",
     "LFPEventFrontBuildConfig",
     "LFPWavefrontCacheConfig",
+    "FrontNullConfig",
+    "WellBurstConfig",
+    "compute_front_null_support",
+    "detect_well_bursts",
+    "event_null_arrival_fit",
+    "front_significant_events",
+    "load_all_wavefront_caches",
+    "peri_anchor_spike_counts",
     "build_lfp_wavefront_caches",
     "ensure_lfp_wavefront_caches",
     "lfp_wavefront_cache_status",
