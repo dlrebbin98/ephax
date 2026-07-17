@@ -1807,15 +1807,28 @@ class FrontNullConfig:
     max_speed_mm_per_s: float = 500.0
 
 
-def detect_well_bursts(raw_file, dataset, *, cfg: WellBurstConfig = WellBurstConfig()):
+def detect_well_bursts(raw_file, dataset, *, cfg: WellBurstConfig = WellBurstConfig(),
+                       cache_dir=None, force_recompute: bool = False):
     """Detect participation bursts for one well; returns ``(bursts_df, info)``.
 
     Thin composition of the existing burst API (``build_population_ifr`` ->
     ``detect_high_activity_epochs`` -> ``build_participation_activity_state`` ->
     ``detect_participation_burst_epochs`` -> ``assign_max_population_ifr_burst_anchors``).
     ``bursts_df`` has ``start_time_s``, ``end_time_s``, ``anchor_time_s`` sorted by anchor.
+
+    Burst detection is deterministic and (over a full recording) slow, so when ``cache_dir`` is
+    given the ``bursts_df`` is pickled there keyed by ``(raw_file, dataset, cfg)`` and reused on
+    later calls / other notebooks. ``info`` is always re-read (cheap) so it stays consistent.
     """
     info = inspect_file(raw_file, dataset)
+    cache_path = None
+    if cache_dir is not None:
+        import hashlib
+        from dataclasses import astuple
+        key = hashlib.md5(repr((str(raw_file), str(dataset), astuple(cfg))).encode()).hexdigest()[:16]
+        cache_path = Path(cache_dir) / f"well_bursts_{key}.pkl"
+        if cache_path.exists() and not force_recompute:
+            return pd.read_pickle(cache_path), info
     spikes, layout, sf = load_data_store_spikes(raw_file, dataset, min_amp=cfg.min_amp)
     stop_s = min(
         info["raw_shape"][1] / info["fs_raw"],
@@ -1838,6 +1851,9 @@ def detect_well_bursts(raw_file, dataset, *, cfg: WellBurstConfig = WellBurstCon
         min_duration_ms=cfg.network_min_duration_ms,
     )
     bursts = assign_max_population_ifr_burst_anchors(highres, bursts).sort_values("anchor_time_s").reset_index(drop=True)
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        bursts.to_pickle(cache_path)
     return bursts, info
 
 
